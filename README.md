@@ -25,9 +25,6 @@ claude-matrix create
 # List sessions
 claude-matrix list
 
-# Delete a session
-claude-matrix delete [session-name]
-
 # Rename a session
 claude-matrix rename [title]
 
@@ -43,7 +40,7 @@ claude-matrix diagnose
 <details>
 <summary>Session Management</summary>
 
-Create, list, delete, and rename tmux sessions tied to repository clones. Sessions track metadata (repo URL, clone path, timestamps) and auto-generate unique names. Switch between sessions directly from the FZF list view.
+Create, list, and rename tmux sessions tied to repository clones. Sessions track metadata (repo URL, clone path, timestamps) and auto-generate unique names. Switch between sessions directly from the FZF list view.
 
 </details>
 
@@ -105,7 +102,6 @@ set -g status-right "#{@claude-matrix-title} | %H:%M"
 When installed as a tmux plugin:
 - `prefix + a` — create session
 - `prefix + A` — list sessions
-- `prefix + D` — delete session
 
 </details>
 
