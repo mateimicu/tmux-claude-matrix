@@ -155,20 +155,17 @@ build_from_source() {
 
 # Helper: bind keybindings for the plugin
 bind_keys() {
-    local create_key list_key delete_key use_popup
+    local create_key list_key use_popup
     create_key=$(get_tmux_option "@claude-matrix-create-key" "a")
     list_key=$(get_tmux_option "@claude-matrix-list-key" "A")
-    delete_key=$(get_tmux_option "@claude-matrix-delete-key" "D")
     use_popup=$(get_tmux_option "@claude-matrix-use-popup" "true")
 
     if [ "$use_popup" = "true" ]; then
         tmux bind-key "$create_key" display-popup -w 80% -h 80% -E "$BINARY create"
         tmux bind-key "$list_key" display-popup -w 80% -h 80% -E "$BINARY list"
-        tmux bind-key "$delete_key" display-popup -w 80% -h 80% -E "$BINARY delete"
     else
         tmux bind-key "$create_key" new-window "$BINARY create"
         tmux bind-key "$list_key" new-window "$BINARY list"
-        tmux bind-key "$delete_key" new-window "$BINARY delete"
     fi
 }
 
