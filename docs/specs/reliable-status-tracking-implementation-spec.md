@@ -5,294 +5,137 @@
 
 ## Architecture Overview
 
-This feature repairs the hook-based status tracking system by: removing unreliable process-based fallback detection, adding a session marker file for TMUX_PANE resolution, fixing the idempotency short-circuit that suppresses timestamp updates, making the staleness threshold configurable, validating all hooks are registered, adding diagnostics, and surfacing errors.
+This feature repairs the hook-based status tracking system. The changes:
 
-The changes touch 7 existing files and add 2 new files. No new external dependencies are required.
+1. Remove unreliable process-based fallback detection — state file is the sole source of truth
+2. Fix the idempotency short-circuit that suppresses timestamp updates
+3. Make the staleness threshold configurable (default 15 min, up from 5)
+4. Validate that ALL hook events are registered, not just one
+5. Add debug logging and a diagnostic command for troubleshooting
+6. Surface errors to stderr instead of silently swallowing them
+7. Clean up state files and window names on SessionEnd
+
+**Deviation from PRD:** The PRD specifies a session marker file as a TMUX_PANE resolution fallback (Req 1). Per user direction, this fallback is **not implemented**. The hook handler requires TMUX_PANE to be set. When it is not, the handler returns a descriptive error (surfaced to stderr and debug log). The `diagnose` command surfaces missing TMUX_PANE as a diagnosable issue.
+
+The changes touch 8 existing files and add 1 new file. No new external dependencies.
 
 ## Component Changes
 
-### 1. Session Marker File (PRD Req 1)
-
-**New file:** `internal/marker/marker.go`
-
-This module manages session-to-pane marker files at `~/.tmux-claude-matrix/sessions/{sessionName}.env`.
-
-**Interfaces:**
-
-```go
-package marker
-
-// MarkerData represents the contents of a session marker file.
-type MarkerData struct {
-    SessionName string `json:"session_name"`
-    TmuxPane    string `json:"tmux_pane"`
-}
-
-// DefaultMarkerDir returns "~/.tmux-claude-matrix/sessions".
-func DefaultMarkerDir() string
-
-// Write atomically writes a marker file mapping sessionName to tmuxPane.
-func Write(markerDir, sessionName, tmuxPane string) error
-
-// Read reads and parses the marker file for the given session.
-func Read(markerDir, sessionName string) (*MarkerData, error)
-
-// Remove deletes the marker file for the given session. Returns nil if not found.
-func Remove(markerDir, sessionName string) error
-
-// FindByPane scans all marker files in markerDir and returns the session name
-// whose TmuxPane matches the given pane ID. Returns ("", nil) if no match.
-func FindByPane(markerDir, tmuxPane string) (string, error)
-
-// List returns all marker files in the directory.
-func List(markerDir string) ([]*MarkerData, error)
-```
-
-**File format:** JSON, same atomic write pattern as `status.WriteState` (write to temp, rename).
-
-**File path:** `{markerDir}/{sessionName}.env` (reuses the existing sessions directory).
-
-**Integration points:**
-- **Write:** Called from `cmd/claude-matrix/create.go` after `tmuxMgr.CreateSession()` succeeds. The pane ID is obtained by querying tmux for the session's pane (`tmux list-panes -t {session} -F "#{pane_id}"`). A new method `GetSessionPane(session string) (string, error)` is added to `tmux.Manager` for this.
-- **Remove:** Called from `cmd/claude-matrix/list.go:handleDeleteAction()` alongside the existing `status.RemoveState` call.
-- **Read/FindByPane:** Called from `internal/hooks/handler.go:HandleHookEvent()` as the TMUX_PANE fallback (see Section 2).
-
-**Note on directory reuse:** The PRD specifies `~/.tmux-claude-matrix/sessions/{sessionName}.env`. The existing `session.Manager` already uses `~/.tmux-claude-matrix/sessions/` for `{sessionName}.json` metadata files. The `.env` extension avoids collision with the `.json` files. `marker.DefaultMarkerDir()` returns the same path as `cfg.SessionsDir`.
-
-### 2. Hook Handler TMUX_PANE Fallback and Error Surfacing (PRD Reqs 1, 2, 5, 8, 9)
+### 1. Hook Handler: Remove Idempotency, Surface Errors (PRD Reqs 2, 5, 8, 9)
 
 **Modified file:** `internal/hooks/handler.go`
 
-**Current signature (unchanged):**
-```go
-func HandleHookEvent(reader io.Reader, mgr *tmux.Manager) error
-```
+**Changes to `HandleHookEvent`:**
 
-**Behavioral changes to `HandleHookEvent`:**
+- **Remove idempotency short-circuit:** Delete the check that skips `WriteState` when state and session ID match. Every hook event must call `WriteState` to refresh the timestamp. This prevents false staleness when the same state is re-entered (e.g., `running -> idle -> running` with the same session ID).
 
-1. **TMUX_PANE fallback via marker file:** When `os.Getenv("TMUX_PANE")` is empty, instead of returning `nil` silently, the handler:
-   - Reads the Claude session ID from the parsed event.
-   - Calls `marker.FindByPane(markerDir, "")` — but since there's no pane to match, the handler instead needs the session name. The hook event contains `session_id` (a Claude Code session ID, not a tmux session name), which is insufficient to directly locate the marker.
-   - **Resolution strategy:** When TMUX_PANE is empty, scan all marker files and try each pane to resolve the session name via `mgr.GetSessionNameFromPane(pane)`. Use the first valid match. This is bounded by the number of active sessions (typically <20).
-   - If no marker resolves, return an error (surfaced to stderr per Req 9).
+- **TMUX_PANE missing → error instead of silent nil:** When `os.Getenv("TMUX_PANE")` is empty, return a descriptive error instead of `nil`. This surfaces the problem via stderr (cobra's error handling) and debug log.
 
-2. **Remove idempotency short-circuit (PRD Req 2, 5):** Delete the `current.State == string(state) && current.SessionID == event.SessionID` check at handler.go:81. Always call `status.WriteState` on every event to refresh the timestamp.
+- **SessionEnd cleanup:** The existing code already handles SessionEnd (rename window, remove state file). No marker file cleanup needed since marker files are not being introduced.
 
-3. **SessionEnd cleanup (PRD Req 8):** The existing SessionEnd handling already calls `mgr.RenameWindowByPane` and `status.RemoveState`. Add `marker.Remove(markerDir, sessionName)` to also clean up the marker file. Ensure this works when TMUX_PANE is empty by using the marker fallback from point 1.
-
-4. **Error surfacing to stderr (PRD Req 9):** When `HandleHookEvent` returns an error, the caller (`cmd/claude-matrix/hook_handler.go`) must write it to stderr. Currently the cobra `RunE` already surfaces errors through cobra's error handling which prints to stderr. Verify this path works. Additionally, within `HandleHookEvent`, when the TMUX_PANE fallback fails, return a descriptive error rather than nil.
+- **Debug logging integration:** Accept a debug logger and log: event received, TMUX_PANE value, resolved session name, state transition, and any errors. The coding expert decides the exact mechanism for passing the logger (additional parameter, options struct, or package-level logger).
 
 **Modified file:** `cmd/claude-matrix/hook_handler.go`
 
-The existing `RunE` function returns errors which cobra prints to stderr. Add explicit `fmt.Fprintf(os.Stderr, ...)` for the error before returning to ensure it's visible even if cobra's error formatting changes.
+- Create and pass a debug logger to `HandleHookEvent`.
+- Ensure errors are written to stderr. Cobra's `RunE` already does this, but the coding expert should verify and add explicit stderr output if needed.
+
+### 2. Remove Process-Based Fallback (PRD Req 4)
+
+**Modified file:** `internal/tmux/tmux.go`
+
+**Delete these functions entirely:**
+- `analyzeClaudeState` — parses pane content for string patterns (inherently unreliable)
+- `capturePaneContent` — captures pane output (only used by analyzeClaudeState)
+- `getProcessState` — inspects process state via `ps` (only used by GetDetailedClaudeState fallback)
+- `getPaneLastActivity` — gets pane timestamp (only used by GetDetailedClaudeState fallback)
+- `processIsClaude` — walks process tree looking for "claude" (only used by GetClaudeStatus and getProcessState)
+- `GetClaudeStatus` — process-based Claude detection (called from list.go, replaced by state file)
+
+**Simplify `GetDetailedClaudeState`:**
+
+The function should accept a staleness threshold parameter instead of hardcoding `5*time.Minute`. The logic becomes:
+
+1. Read state file → if missing, return `Unknown`
+2. If stale (exceeds threshold) → return `Unknown`
+3. If valid → return the state from the file
+
+No process inspection. No pane content parsing. `Unknown` for anything the state file can't answer.
+
+**Modified file:** `cmd/claude-matrix/list.go`
+
+- Remove the call to `tmuxMgr.GetClaudeStatus()` — function is deleted
+- Derive `ClaudeRunning` from the state value instead
+- Pass the configured staleness threshold to `GetDetailedClaudeState`
+
+**Modified file:** `internal/tmux/tmux_test.go`
+
+- Remove `TestAnalyzeClaudeState` — function is deleted
+- Keep `TestStripEmojiPrefix`
 
 ### 3. Configurable Staleness Threshold (PRD Req 3)
 
 **Modified file:** `pkg/types/types.go`
 
-Add a `StaleThreshold` field to the `Config` struct:
-
-```go
-type Config struct {
-    // ... existing fields ...
-    StaleThreshold time.Duration
-}
-```
+Add `StaleThreshold time.Duration` to the `Config` struct.
 
 **Modified file:** `internal/config/config.go`
 
-- In `defaults()`: set `StaleThreshold: 15 * time.Minute`
-- In `applyConfigValue()`: handle `STALE_THRESHOLD` key (parse as minutes integer or duration string)
-- In `applyEnvOverrides()`: handle `CLAUDE_MATRIX_STALE_THRESHOLD` env var (parse as minutes integer)
+- Default: `15 * time.Minute`
+- Config file key: `STALE_THRESHOLD` (value in minutes, e.g., `STALE_THRESHOLD=30`)
+- Env var: `CLAUDE_MATRIX_STALE_THRESHOLD` (value in minutes, e.g., `CLAUDE_MATRIX_STALE_THRESHOLD=30`)
+- Env var overrides config file, which overrides default (existing precedence pattern)
+- Invalid values (non-numeric, zero, negative) fall back to the default
 
-**Modified file:** `internal/tmux/tmux.go`
-
-`GetDetailedClaudeState` currently hardcodes `5*time.Minute`. Change its signature to accept the threshold:
-
-```go
-func (m *Manager) GetDetailedClaudeState(session string, staleThreshold time.Duration) (types.ClaudeState, time.Time)
-```
-
-Callers (`cmd/claude-matrix/list.go`) pass `cfg.StaleThreshold` from the loaded config.
-
-### 4. Remove Process-Based Fallback (PRD Req 4)
-
-**Modified file:** `internal/tmux/tmux.go`
-
-**Delete the following functions entirely:**
-- `analyzeClaudeState` (lines 353-413)
-- `capturePaneContent` (lines 286-294)
-- `getProcessState` (lines 297-331)
-- `getPaneLastActivity` (lines 334-351)
-- `processIsClaude` (lines 126-158)
-- `GetClaudeStatus` (lines 105-123) — also unused after this change
-
-**Simplify `GetDetailedClaudeState`:**
-
-```
-func (m *Manager) GetDetailedClaudeState(session string, staleThreshold time.Duration) (types.ClaudeState, time.Time):
-    1. Read state file via status.ReadState(statusDir, session)
-    2. If error (file missing): return ClaudeStateUnknown, zero time
-    3. If stale (status.IsStale(sf, staleThreshold)): return ClaudeStateUnknown, sf.UpdatedAt
-    4. If valid state: return state, sf.UpdatedAt
-    5. Otherwise: return ClaudeStateUnknown, sf.UpdatedAt
-```
-
-No process inspection. No pane content parsing. Unknown for anything outside the state file.
-
-**Modified file:** `cmd/claude-matrix/list.go`
-
-- Remove the call to `tmuxMgr.GetClaudeStatus(sess.Name)` — this function is deleted.
-- The `ClaudeRunning` field on `SessionStatus` can be derived from `ClaudeState != Stopped && ClaudeState != Unknown`.
-- Pass `cfg.StaleThreshold` to `GetDetailedClaudeState`.
-
-**Modified file:** `internal/tmux/tmux_test.go`
-
-- Remove `TestAnalyzeClaudeState` — the function is deleted.
-- Keep `TestStripEmojiPrefix`.
-
-### 5. Validate All Hooks Are Registered (PRD Req 5/6)
+### 4. Validate All Hooks Registered (PRD Req 5/6)
 
 **Modified file:** `internal/hooks/settings.go`
 
-Change `isSetupInFile` logic. Currently it returns `true` on the FIRST match. Change to return `true` only when ALL events in `hookEventDefs` have a matching entry.
+- **Fix `isSetupInFile`:** Currently returns `true` on the first matching event. Change to return `true` only when ALL events in `hookEventDefs` have a matching entry.
 
-**New exported function for partial registration detection:**
+- **Add `MissingHookEvents` function:** Returns the list of event names that are not registered in the settings file. Returns `nil` if all are registered. Provide a testable internal variant that accepts an explicit file path.
 
-```go
-// MissingHookEvents returns the list of hook event names that are not registered
-// in the settings file. Returns nil if all are registered.
-func MissingHookEvents(binaryPath string) ([]string, error)
-
-// Internal: missingHookEventsInFile (testable variant with explicit path)
-func missingHookEventsInFile(binaryPath, settingsPath string) ([]string, error)
-```
-
-**Integration point:** `cmd/claude-matrix/diagnose.go` calls `MissingHookEvents` and reports any missing events as warnings.
-
-### 6. Debug Logging (PRD Req 6)
+### 5. Debug Logging (PRD Req 6)
 
 **New file:** `internal/debug/debug.go`
 
-A lightweight debug logger. NOT a full logging framework — just a conditional writer.
+A thin wrapper around `log.Logger` from stdlib. When enabled, it opens `~/.tmux-claude-matrix/logs/hooks.log` for append and writes timestamped messages. When disabled, all writes are no-ops.
 
-```go
-package debug
+**Enablement:** `CLAUDE_MATRIX_DEBUG=1` env var OR `DEBUG=1` in the config file.
 
-import (
-    "io"
-    "os"
-)
+**Modified file:** `pkg/types/types.go` — Add `Debug bool` to `Config`.
 
-// Logger writes debug messages to a log file when enabled.
-type Logger struct {
-    w       io.WriteCloser
-    enabled bool
-}
+**Modified file:** `internal/config/config.go` — Handle `DEBUG` config key and `CLAUDE_MATRIX_DEBUG` env var.
 
-// New creates a Logger. If CLAUDE_MATRIX_DEBUG=1 or the config flag is set,
-// it opens the log file at logPath for append. Otherwise, all writes are no-ops.
-func New(logPath string, enabled bool) *Logger
+**Integration:** The hook handler (`cmd/claude-matrix/hook_handler.go`) creates the logger and passes it to `HandleHookEvent`. The coding expert decides the passing mechanism.
 
-// Log writes a timestamped message to the log file (no-op if disabled).
-func (l *Logger) Log(format string, args ...interface{})
-
-// Close closes the underlying file.
-func (l *Logger) Close()
-
-// IsEnabled returns whether debug logging is active.
-func (l *Logger) IsEnabled() bool
-```
-
-**Log file path:** `~/.tmux-claude-matrix/logs/hooks.log`
-
-**Enablement:** Check `os.Getenv("CLAUDE_MATRIX_DEBUG") == "1"` OR a config file field `DEBUG=1`. The `debug.New` function checks the env var itself; the caller can also pass `enabled=true` from config.
-
-**Integration points:**
-- `internal/hooks/handler.go`: Accept a `*debug.Logger` parameter (or create one internally). Log every event received, TMUX_PANE resolution, state transitions, and errors.
-- To keep the `HandleHookEvent` signature manageable, add an `Options` struct:
-
-```go
-type HandleOptions struct {
-    MarkerDir string
-    Logger    *debug.Logger
-}
-
-func HandleHookEvent(reader io.Reader, mgr *tmux.Manager, opts HandleOptions) error
-```
-
-- `cmd/claude-matrix/hook_handler.go`: Create the logger and pass it via `HandleOptions`.
-
-**Config change:** Add `Debug bool` to `types.Config`. Handle `DEBUG` key in config file and `CLAUDE_MATRIX_DEBUG` env var in `config.go`.
-
-### 7. Diagnostic Command Enhancement (PRD Req 7)
+### 6. Diagnostic Command Enhancement (PRD Req 7)
 
 **Modified file:** `cmd/claude-matrix/diagnose.go`
 
-The existing `diagnose` command focuses on repository discovery. Add a new section for hook/status diagnostics. The command structure stays the same (single `diagnose` command), just with additional output sections.
+The existing `diagnose` command reports on repository discovery. Add new sections for hook/status diagnostics **before** the existing repository sections (since hook health is more immediately actionable).
 
-**New diagnostic sections to add:**
+**New diagnostic sections:**
 
-1. **Hook registration check:**
-   - Call `hooks.MissingHookEvents(binaryPath)`.
-   - Report each event's registration status (registered/missing).
-   - Report the binary path found in hook commands and whether it resolves to an executable (use `exec.LookPath` or `os.Stat`).
+1. **Hook registration** — Call `hooks.MissingHookEvents(binaryPath)`. Report each event as registered/missing. Report the binary path from hook commands and whether it resolves to an executable.
 
-2. **State file inventory:**
-   - List all `.state` files in `status.DefaultStatusDir()`.
-   - For each: show session name, state value, and age (time since UpdatedAt).
+2. **State files** — List all `.state` files in the status directory. For each: session name, state value, age.
 
-3. **Marker file inventory:**
-   - Call `marker.List(markerDir)`.
-   - For each: show session name, pane ID, and whether the pane is still valid (query tmux).
+3. **Active tmux sessions** — List sessions and their window names.
 
-4. **Active tmux sessions:**
-   - Call `tmuxMgr.ListSessions()`.
-   - For each: show session name and window names.
+4. **Environment** — Show `TMUX_PANE`, `CLAUDE_MATRIX_DEBUG`, `CLAUDE_MATRIX_STALE_THRESHOLD` values, and the configured stale threshold.
 
-5. **Environment:**
-   - Show `TMUX_PANE` value.
-   - Show `CLAUDE_MATRIX_DEBUG` value.
-   - Show `CLAUDE_MATRIX_STALE_THRESHOLD` value.
-   - Show configured stale threshold from config.
-
-**Note:** The existing repository diagnostics remain unchanged. The new sections are appended after them.
-
-### 8. SessionEnd Marker Cleanup (PRD Req 8)
-
-Already covered in Section 2 (Hook Handler changes). When `SessionEnd` fires:
-1. Resolve pane via TMUX_PANE or marker fallback.
-2. Rename window to plain "claude" (existing behavior).
-3. Remove state file (existing behavior).
-4. Remove marker file (new behavior).
+The existing repository diagnostic sections remain unchanged.
 
 ## Data Flow Diagrams
 
-### Session Creation Flow (with marker file)
-
-```
-User runs "claude-matrix create"
-  |
-  v
-create.go: tmuxMgr.CreateSession(name, path, cmd)
-  |
-  v
-create.go: pane = tmuxMgr.GetSessionPane(name)  [NEW]
-  |
-  v
-create.go: marker.Write(sessionsDir, name, pane) [NEW]
-  |
-  v
-create.go: sessionMgr.Save(sess)                 [existing]
-```
-
-### Hook Event Flow (with TMUX_PANE fallback)
+### Hook Event Flow
 
 ```
 Claude Code fires hook event
   |
   v
-hook_handler.go: HandleHookEvent(stdin, mgr, opts)
+hook_handler.go: HandleHookEvent(stdin, mgr, ...)
   |
   v
 Parse JSON event from stdin
@@ -300,23 +143,31 @@ Parse JSON event from stdin
   v
 Map event to ClaudeState
   |
-  +--> TMUX_PANE set?
-  |      YES: sessionName = mgr.GetSessionNameFromPane(pane)
-  |      NO:  scan marker files, try each pane -> resolve sessionName [NEW]
-  |           If no match: return error to stderr [NEW]
+  v
+TMUX_PANE set?
+  |
+  YES                              NO
+  |                                |
+  v                                v
+Resolve session name        Return error to stderr
+via mgr.GetSessionNameFromPane    + debug log
   |
   v
-Always write state file (no idempotency check) [CHANGED]
+SessionEnd event?
   |
-  +--> SessionEnd?
-  |      YES: rename window "claude", remove state file, remove marker file [CHANGED]
-  |      NO:  rename window "{emoji}claude"
-  |
-  v
-Log to debug log if enabled [NEW]
+  YES                              NO
+  |                                |
+  v                                v
+Rename window "claude"      Write state file (always)
+Remove state file           Rename window "{emoji}claude"
+  |                                |
+  +----------------+---------------+
+                   |
+                   v
+           Log to debug log (if enabled)
 ```
 
-### State Reading Flow (simplified)
+### State Reading Flow
 
 ```
 list.go: GetDetailedClaudeState(session, staleThreshold)
@@ -324,118 +175,127 @@ list.go: GetDetailedClaudeState(session, staleThreshold)
   v
 Read state file
   |
-  +--> File missing?        -> return Unknown
-  +--> File stale?          -> return Unknown  [CHANGED: no fallback]
-  +--> Valid state present? -> return state
+  +--> File missing? --> return Unknown, zero time
+  +--> File stale?   --> return Unknown, file's UpdatedAt
+  +--> Valid?        --> return state, file's UpdatedAt
 ```
 
-### Session Deletion Flow (with marker cleanup)
+### Session Deletion Flow
 
 ```
 list.go: handleDeleteAction()
   |
   v
-Kill tmux session (existing)
+Kill tmux session             [existing]
   |
   v
-sessionMgr.Delete(name)          [existing]
+sessionMgr.Delete(name)      [existing]
   |
   v
-status.RemoveState(dir, name)    [existing]
-  |
-  v
-marker.Remove(sessionsDir, name) [NEW]
+status.RemoveState(dir, name) [existing]
 ```
 
 ## File Change Summary
 
-| File | Change Type | PRD Reqs |
-|------|-------------|----------|
-| `internal/marker/marker.go` | **NEW** | 1, 8 |
+| File | Change | PRD Reqs |
+|------|--------|----------|
 | `internal/debug/debug.go` | **NEW** | 6 |
-| `internal/hooks/handler.go` | MODIFY | 1, 2, 5, 6, 8, 9 |
+| `internal/hooks/handler.go` | MODIFY | 2, 5, 6, 8, 9 |
 | `internal/hooks/settings.go` | MODIFY | 5 |
-| `internal/tmux/tmux.go` | MODIFY (major) | 3, 4 |
+| `internal/tmux/tmux.go` | MODIFY (major — delete 6 functions) | 3, 4 |
 | `internal/config/config.go` | MODIFY | 3, 6 |
 | `pkg/types/types.go` | MODIFY | 3, 6 |
 | `cmd/claude-matrix/hook_handler.go` | MODIFY | 6, 9 |
-| `cmd/claude-matrix/create.go` | MODIFY | 1 |
-| `cmd/claude-matrix/list.go` | MODIFY | 1, 3, 4 |
+| `cmd/claude-matrix/list.go` | MODIFY | 3, 4 |
 | `cmd/claude-matrix/diagnose.go` | MODIFY (major) | 7 |
 
-## Test Boundaries
+## Test Plan
 
-### New test file: `internal/marker/marker_test.go`
-- Write/Read/Remove round-trip
-- FindByPane with multiple markers
-- FindByPane with no match
-- Remove non-existent file (idempotent)
+### Coverage targets
 
-### New test file: `internal/debug/debug_test.go`
-- Logger enabled: writes to file
-- Logger disabled: no-ops
-- Log format includes timestamps
+All new and modified code should maintain the existing test patterns in the codebase. Every behavioral change listed below needs at least one test. The coding expert should aim for branch coverage of the modified functions.
 
-### Modified: `internal/hooks/handler_test.go`
-- Test TMUX_PANE fallback: when env var is empty, handler uses marker file
-- Test idempotency removal: same state+sessionID still writes (timestamp updates)
-- Test SessionEnd removes marker file
-- Test error is returned when TMUX_PANE is empty and no marker matches
+### `internal/debug/debug_test.go` (new)
 
-### Modified: `internal/hooks/settings_test.go`
-- Test `isSetupInFile` returns false when only some events are registered
-- Test `isSetupInFile` returns true only when ALL events are registered
-- Test `MissingHookEvents` returns correct missing event list
+| Scenario | Given | When | Then |
+|----------|-------|------|------|
+| Enabled logger writes | `CLAUDE_MATRIX_DEBUG=1` | `Log("msg")` called | Message appears in log file with timestamp |
+| Disabled logger is no-op | Debug disabled | `Log("msg")` called | No file created, no error |
+| Nil logger safety | Logger is nil | Caller attempts to log | No panic (coding expert decides: nil check or guaranteed non-nil) |
 
-### Modified: `internal/tmux/tmux_test.go`
-- Remove `TestAnalyzeClaudeState` (function deleted)
-- Keep `TestStripEmojiPrefix`
-- Add test for simplified `GetDetailedClaudeState`: state file present/missing/stale scenarios
+### `internal/hooks/handler_test.go` (modified)
 
-### Modified: `internal/status/status_test.go`
-- No changes expected (existing tests remain valid)
+| Scenario | Given | When | Then |
+|----------|-------|------|------|
+| Idempotency removed | State file has `running` + same session ID | `UserPromptSubmit` event fires | State file is rewritten with fresh timestamp |
+| TMUX_PANE missing | `TMUX_PANE` env var is empty | Any hook event fires | Returns non-nil error containing "TMUX_PANE" |
+| SessionEnd cleanup | State file exists, TMUX_PANE is set | `SessionEnd` event fires | State file removed, window renamed to "claude" |
+| SessionEnd with missing state file | No state file exists | `SessionEnd` event fires | No error (idempotent removal) |
+| Invalid JSON input | Stdin contains malformed JSON | `HandleHookEvent` called | Returns parse error |
+| Unknown event type | Event has unrecognized `hook_event_name` | `HandleHookEvent` called | Maps to `Unknown` state, still writes state file |
 
-### Modified: `internal/config/config_test.go` (if exists, else new)
-- Test `STALE_THRESHOLD` config file parsing
-- Test `CLAUDE_MATRIX_STALE_THRESHOLD` env var override
-- Test `DEBUG` config/env parsing
+### `internal/hooks/settings_test.go` (modified)
+
+| Scenario | Given | When | Then |
+|----------|-------|------|------|
+| All events registered | Settings file has all 6 hook events | `isSetupInFile` called | Returns `true` |
+| Partial registration | Settings file has only 3 of 6 events | `isSetupInFile` called | Returns `false` |
+| No events registered | Empty settings file | `isSetupInFile` called | Returns `false` |
+| Missing events list | Settings file has 4 of 6 events | `MissingHookEvents` called | Returns the 2 missing event names |
+| All present | Settings file has all events | `MissingHookEvents` called | Returns `nil` |
+
+### `internal/tmux/tmux_test.go` (modified)
+
+| Scenario | Given | When | Then |
+|----------|-------|------|------|
+| State file present and fresh | Valid state file, age < threshold | `GetDetailedClaudeState` called | Returns state from file |
+| State file stale | Valid state file, age > threshold | `GetDetailedClaudeState` called | Returns `Unknown` |
+| State file missing | No state file for session | `GetDetailedClaudeState` called | Returns `Unknown`, zero time |
+| Staleness boundary | State file age == threshold exactly | `GetDetailedClaudeState` called | Returns the state (not stale; stale is strictly >) |
+| `stripEmojiPrefix` | (existing tests) | — | — (keep as-is) |
+| Remove `TestAnalyzeClaudeState` | — | — | Delete (function removed) |
+
+### `internal/config/config_test.go` (new or modified)
+
+| Scenario | Given | When | Then |
+|----------|-------|------|------|
+| Default stale threshold | No config, no env var | `Load()` | `StaleThreshold` is 15 min |
+| Config file override | `STALE_THRESHOLD=30` in config | `Load()` | `StaleThreshold` is 30 min |
+| Env var override | `CLAUDE_MATRIX_STALE_THRESHOLD=45` | `Load()` | `StaleThreshold` is 45 min |
+| Env var beats config | Config has 30, env var has 45 | `Load()` | `StaleThreshold` is 45 min |
+| Invalid threshold value | `STALE_THRESHOLD=abc` in config | `Load()` | Falls back to default (15 min) |
+| Zero threshold | `STALE_THRESHOLD=0` in config | `Load()` | Falls back to default (15 min) |
+| Debug enabled via env | `CLAUDE_MATRIX_DEBUG=1` | `Load()` | `Debug` is true |
+| Debug enabled via config | `DEBUG=1` in config | `Load()` | `Debug` is true |
+
+### Backward compatibility
+
+| Scenario | Given | When | Then |
+|----------|-------|------|------|
+| Pre-existing sessions | Sessions created before this change (no state files) | `list` command runs | Shows `Unknown` state (not `Stopped`) |
+| Partial hook registration | User has old settings.json with fewer events | `IsSetup` called | Returns `false`; `diagnose` lists missing events |
 
 ## Implementation Order (Suggested PRs)
 
-The coding expert may choose to implement in a single PR or split into stacked PRs. A suggested order that minimizes merge conflicts:
+The coding expert may implement in a single PR or split. A suggested grouping:
 
-1. **PR 1 — Marker file module + session creation integration** (Req 1)
-   - New `internal/marker/` package
-   - New `tmux.GetSessionPane()` method
-   - Modify `create.go` and `list.go` for write/cleanup
+1. **PR 1 — Core fixes** (Reqs 2, 3, 4, 5, 8, 9)
+   - Remove process fallback, simplify `GetDetailedClaudeState`
+   - Remove idempotency short-circuit in handler
+   - Add configurable staleness threshold
+   - Fix `isSetupInFile` to check all events, add `MissingHookEvents`
+   - Surface errors to stderr
+   - Update `list.go` caller
 
-2. **PR 2 — Hook handler fixes** (Reqs 2, 5, 8, 9)
-   - TMUX_PANE fallback via marker
-   - Remove idempotency check
-   - SessionEnd marker cleanup
-   - Error surfacing to stderr
-   - Introduce `HandleOptions` struct
-
-3. **PR 3 — Remove process fallback + configurable staleness** (Reqs 3, 4)
-   - Delete `analyzeClaudeState` and related functions
-   - Simplify `GetDetailedClaudeState`
-   - Add `StaleThreshold` to config
-   - Update list.go caller
-
-4. **PR 4 — Hook validation + diagnostics + debug logging** (Reqs 5, 6, 7)
-   - Fix `isSetupInFile` to check ALL events
-   - Add `MissingHookEvents`
+2. **PR 2 — Diagnostics and debug logging** (Reqs 6, 7)
    - New `internal/debug/` package
-   - Enhance `diagnose` command
-
-This order ensures each PR is independently testable and reviewable.
+   - Integrate debug logging into hook handler
+   - Enhance `diagnose` command with hook/status sections
 
 ## Risks and Considerations
 
-1. **Marker file directory collision:** Marker `.env` files share `~/.tmux-claude-matrix/sessions/` with session `.json` files. The different extensions prevent collision, but the `session.Manager.List()` function filters by `.json` extension so it won't be affected.
+1. **Sessions without TMUX_PANE:** Claude Code Teams sub-agents may run in child processes without TMUX_PANE. Without the fallback, these will produce errors in stderr and show `Unknown` state. The `diagnose` command surfaces this. If this proves to be a common problem in practice, a follow-up change can add a resolution mechanism.
 
-2. **TMUX_PANE fallback performance:** Scanning all marker files and querying tmux for each is O(N) where N = number of active sessions. With typical usage (<20 sessions), this is negligible. The hook handler is invoked per-event so it must stay fast.
+2. **Backward compatibility:** Sessions created before this change won't have state files written by hooks if hooks weren't registered. They will show `Unknown` instead of the previous (unreliable) `Stopped`. This is an improvement — `Unknown` is honest, `Stopped` was often wrong.
 
-3. **Race condition on marker write:** If `create.go` writes the marker file but the tmux session hasn't fully initialized, the pane query might fail. Mitigation: query the pane after `CreateSession` returns, which blocks until the session exists.
-
-4. **Backward compatibility:** Sessions created before this change won't have marker files. The TMUX_PANE fallback gracefully degrades — if no marker is found and TMUX_PANE is empty, the handler returns an error rather than silently dropping the event. The `diagnose` command helps users identify this.
+3. **Config validation:** Invalid staleness threshold values (zero, negative, non-numeric) must fall back to the default rather than causing errors. The coding expert should handle this in the config parsing.
