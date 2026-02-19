@@ -67,7 +67,7 @@ If ANY agent is `running`, the aggregate is `running` regardless of other agents
 ### Backward Compatibility
 
 The reader must handle both the old format and the new format:
-- **Old format** (has `"state"` key at top level): Treat as single-agent. The first write from the new code overwrites with the multi-agent format.
+- **Old format** (has `"state"` key at top level): Treat as single-agent. Use the old `session_id` field as the agent key in the converted map (or a sentinel like `"legacy"` if `session_id` is empty). The first write from the new code overwrites with the multi-agent format.
 - **New format** (has `"agents"` key): Use multi-agent logic.
 
 ### Concurrency
@@ -96,7 +96,7 @@ The state file format and API change substantially. The coding expert implements
 
 - **`ReadStateFile(statusDir, sessionName string) (*StateFile, error)`** — Reads and parses the state file. Handles both old format (converts to single-agent map) and new format.
 
-- **`ComputeState(sf *StateFile, staleThreshold time.Duration) (ClaudeState, time.Time)`** — Iterates agent entries, excludes stale ones, returns the highest-priority state and the most recent `updated_at` among non-stale entries. Returns `stopped` if all entries are stale or map is empty.
+- **`ComputeState(sf *StateFile, staleThreshold time.Duration) (ClaudeState, time.Time)`** — Iterates agent entries, excludes stale ones, returns the highest-priority state and the most recent `updated_at` among non-stale entries. Returns `unknown` if all entries are stale (agents exist but none reporting). Returns `stopped` if the agents map is empty (all agents have ended).
 
 - **Keep unchanged:** `RemoveState`, `DefaultStatusDir`, `EmojiForState`, `stateFilePath`.
 
@@ -241,13 +241,19 @@ RemoveAgentState(             UpdateAgentState(
   event.session_id)             event.session_id,
   |                             state)
   |                                |
-  +----------------+---------------+
-                   |
-                   v
-       ReadStateFile → ComputeState(staleThreshold)
-                   |
-                   v
-       Rename window "{emoji}claude" (based on aggregate)
+  v                                v
+File deleted                  ReadStateFile →
+(last agent)?                   ComputeState(staleThreshold)
+  |                                |
+  YES         NO                   v
+  |           |              Rename window
+  v           v              "{emoji}claude"
+Rename     ReadStateFile →      (based on aggregate)
+"⚫claude"  ComputeState →
+(stopped)   Rename window
+             "{emoji}claude"
+  |           |                    |
+  +-----------+--------------------+
                    |
                    v
        Log to debug log (if enabled)
@@ -282,8 +288,9 @@ ReadStateFile(statusDir, session)
   +--> Old format?    --> convert to single-agent map, then compute
   +--> New format?    --> ComputeState(sf, staleThreshold)
                            |
-                           +--> All entries stale or empty? --> return Unknown
-                           +--> Has non-stale entries?      --> return aggregate state
+                           +--> All entries stale?  --> return Unknown
+                           +--> Map empty?          --> return Stopped
+                           +--> Has non-stale?      --> return aggregate state
 ```
 
 ### Session Deletion Flow
