@@ -34,6 +34,11 @@ func runCreate(ctx context.Context) error {
 	cfg := configFromContext(ctx)
 	log := loggerFromContext(ctx)
 
+	// Check FZF version before any network I/O (fail-fast)
+	if err := fzf.CheckFZFVersion(); err != nil {
+		return err
+	}
+
 	// Build sources list
 	sources, err := buildSources(ctx, cfg, log)
 	if err != nil {
