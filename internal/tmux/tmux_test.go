@@ -1,8 +1,12 @@
 package tmux
 
 import (
+	"encoding/json"
+	"os"
 	"testing"
+	"time"
 
+	"github.com/mateimicu/tmux-claude-matrix/internal/status"
 	"github.com/mateimicu/tmux-claude-matrix/pkg/types"
 )
 
@@ -34,90 +38,124 @@ func TestStripEmojiPrefix(t *testing.T) {
 	}
 }
 
-func TestAnalyzeClaudeState(t *testing.T) {
-	m := &Manager{}
+func TestGetDetailedClaudeState_MultiAgent(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "tmux-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
 
-	tests := []struct {
-		name         string
-		processState string
-		content      string
-		expected     types.ClaudeState
-	}{
-		{
-			name:         "Error state - error indicator",
-			processState: "S",
-			content:      "Error: Something went wrong",
-			expected:     types.ClaudeStateError,
-		},
-		{
-			name:         "Error state - traceback",
-			processState: "S",
-			content:      "Traceback (most recent call last):",
-			expected:     types.ClaudeStateError,
-		},
-		{
-			name:         "Waiting for input - yes/no prompt",
-			processState: "S",
-			content:      "Continue? (yes/no)",
-			expected:     types.ClaudeStateWaitingForInput,
-		},
-		{
-			name:         "Waiting for input - y/n prompt",
-			processState: "S",
-			content:      "Continue? [y/N]",
-			expected:     types.ClaudeStateWaitingForInput,
-		},
-		{
-			name:         "Running state",
-			processState: "R",
-			content:      "Processing your request...",
-			expected:     types.ClaudeStateRunning,
-		},
-		{
-			name:         "Idle state - completed",
-			processState: "S",
-			content:      "Task completed successfully",
-			expected:     types.ClaudeStateIdle,
-		},
-		{
-			name:         "Idle state - done",
-			processState: "S",
-			content:      "Done processing",
-			expected:     types.ClaudeStateIdle,
-		},
-		{
-			name:         "Sleeping with no indicators",
-			processState: "S",
-			content:      "Some output here",
-			expected:     types.ClaudeStateWaitingForInput,
-		},
-		{
-			name:         "Zombie process",
-			processState: "Z",
-			content:      "",
-			expected:     types.ClaudeStateError,
-		},
-		{
-			name:         "Disk wait state",
-			processState: "D",
-			content:      "Reading file...",
-			expected:     types.ClaudeStateRunning,
-		},
-		{
-			name:         "Unknown process state",
-			processState: "X",
-			content:      "",
-			expected:     types.ClaudeStateUnknown,
-		},
+	// Override HOME so DefaultStatusDir uses our temp dir
+	origHome := os.Getenv("HOME")
+	t.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome) //nolint:errcheck
+
+	statusDir := status.DefaultStatusDir()
+	if err := os.MkdirAll(statusDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := m.analyzeClaudeState(tt.processState, tt.content)
-			if result != tt.expected {
-				t.Errorf("analyzeClaudeState(%q, %q) = %q, expected %q",
-					tt.processState, tt.content, result, tt.expected)
-			}
-		})
+	// Write multi-agent state file
+	if err := status.UpdateAgentState(statusDir, "test-sess", "agent-1", types.ClaudeStateRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := status.UpdateAgentState(statusDir, "test-sess", "agent-2", types.ClaudeStateIdle); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New()
+	state, ts := m.GetDetailedClaudeState("test-sess", 15*time.Minute)
+
+	if state != types.ClaudeStateRunning {
+		t.Errorf("state = %q, want running", state)
+	}
+	if ts.IsZero() {
+		t.Error("timestamp should not be zero")
+	}
+}
+
+func TestGetDetailedClaudeState_AllStale(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "tmux-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	t.Setenv("HOME", tmpDir)
+
+	statusDir := status.DefaultStatusDir()
+	if err := os.MkdirAll(statusDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a state file directly with old timestamps
+	sf := status.StateFile{
+		Agents: map[string]status.AgentState{
+			"agent-1": {State: types.ClaudeStateRunning, UpdatedAt: time.Now().Add(-20 * time.Minute)},
+		},
+	}
+	data, _ := json.Marshal(sf)
+	if err := os.WriteFile(statusDir+"/test-sess.state", data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New()
+	state, _ := m.GetDetailedClaudeState("test-sess", 15*time.Minute)
+
+	if state != types.ClaudeStateUnknown {
+		t.Errorf("state = %q, want unknown (all stale)", state)
+	}
+}
+
+func TestGetDetailedClaudeState_Missing(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "tmux-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	t.Setenv("HOME", tmpDir)
+
+	m := New()
+	state, ts := m.GetDetailedClaudeState("nonexistent", 15*time.Minute)
+
+	if state != types.ClaudeStateUnknown {
+		t.Errorf("state = %q, want unknown", state)
+	}
+	if !ts.IsZero() {
+		t.Error("timestamp should be zero for missing state")
+	}
+}
+
+func TestGetDetailedClaudeState_OldFormat(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "tmux-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	t.Setenv("HOME", tmpDir)
+
+	statusDir := status.DefaultStatusDir()
+	if err := os.MkdirAll(statusDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write old format
+	oldFormat := map[string]interface{}{
+		"state":      "running",
+		"updated_at": time.Now().Format(time.RFC3339Nano),
+		"session_id": "old-sess",
+	}
+	data, _ := json.Marshal(oldFormat)
+	if err := os.WriteFile(statusDir+"/test-sess.state", data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New()
+	state, _ := m.GetDetailedClaudeState("test-sess", 15*time.Minute)
+
+	if state != types.ClaudeStateRunning {
+		t.Errorf("state = %q, want running (backward compat)", state)
 	}
 }

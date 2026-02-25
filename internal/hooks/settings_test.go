@@ -372,6 +372,160 @@ func TestIsSetupInFile(t *testing.T) {
 	})
 }
 
+func TestIsSetupInFile_PartialRegistration(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "hooks-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	settingsPath := filepath.Join(tmpDir, "partial.json")
+	binaryPath := "/usr/local/bin/claude-matrix"
+	command := binaryPath + " hook-handler " + hookMarker
+
+	// Only register 3 of 6 events
+	settings := map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"UserPromptSubmit": []interface{}{
+				map[string]interface{}{
+					"hooks": []interface{}{
+						map[string]interface{}{"type": "command", "command": command},
+					},
+				},
+			},
+			"PreToolUse": []interface{}{
+				map[string]interface{}{
+					"hooks": []interface{}{
+						map[string]interface{}{"type": "command", "command": command},
+					},
+				},
+			},
+			"Stop": []interface{}{
+				map[string]interface{}{
+					"hooks": []interface{}{
+						map[string]interface{}{"type": "command", "command": command},
+					},
+				},
+			},
+		},
+	}
+	data, _ := json.MarshalIndent(settings, "", "  ")
+	if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := isSetupInFile(binaryPath, settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("expected isSetupInFile to return false when only 3 of 6 events are registered")
+	}
+}
+
+func TestMissingHookEventsInFile(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "hooks-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	binaryPath := "/usr/local/bin/claude-matrix"
+
+	t.Run("all registered", func(t *testing.T) {
+		settingsPath := filepath.Join(tmpDir, "all.json")
+		if err := setupHooksToFile(binaryPath, settingsPath); err != nil {
+			t.Fatal(err)
+		}
+
+		missing, err := missingHookEventsInFile(binaryPath, settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(missing) != 0 {
+			t.Errorf("expected no missing events, got %v", missing)
+		}
+	})
+
+	t.Run("partial registration", func(t *testing.T) {
+		settingsPath := filepath.Join(tmpDir, "partial.json")
+		command := binaryPath + " hook-handler " + hookMarker
+
+		// Only 4 of 6 events registered
+		settings := map[string]interface{}{
+			"hooks": map[string]interface{}{
+				"UserPromptSubmit": []interface{}{
+					map[string]interface{}{
+						"hooks": []interface{}{
+							map[string]interface{}{"type": "command", "command": command},
+						},
+					},
+				},
+				"PreToolUse": []interface{}{
+					map[string]interface{}{
+						"hooks": []interface{}{
+							map[string]interface{}{"type": "command", "command": command},
+						},
+					},
+				},
+				"Stop": []interface{}{
+					map[string]interface{}{
+						"hooks": []interface{}{
+							map[string]interface{}{"type": "command", "command": command},
+						},
+					},
+				},
+				"Notification": []interface{}{
+					map[string]interface{}{
+						"hooks": []interface{}{
+							map[string]interface{}{"type": "command", "command": command},
+						},
+					},
+				},
+			},
+		}
+		data, _ := json.MarshalIndent(settings, "", "  ")
+		if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		missing, err := missingHookEventsInFile(binaryPath, settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(missing) != 2 {
+			t.Fatalf("expected 2 missing events, got %d: %v", len(missing), missing)
+		}
+
+		// The missing events should be SessionStart and SessionEnd
+		missingMap := make(map[string]bool)
+		for _, m := range missing {
+			missingMap[m] = true
+		}
+		if !missingMap["SessionStart"] {
+			t.Error("expected SessionStart to be missing")
+		}
+		if !missingMap["SessionEnd"] {
+			t.Error("expected SessionEnd to be missing")
+		}
+	})
+
+	t.Run("no events registered", func(t *testing.T) {
+		settingsPath := filepath.Join(tmpDir, "empty.json")
+		if err := os.WriteFile(settingsPath, []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		missing, err := missingHookEventsInFile(binaryPath, settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(missing) != 6 {
+			t.Errorf("expected 6 missing events, got %d", len(missing))
+		}
+	})
+}
+
 // verifyHookCommand checks that a hook event has an entry with the expected command.
 func verifyHookCommand(t *testing.T, hooks map[string]interface{}, event, expectedCmd string) {
 	t.Helper()

@@ -55,6 +55,7 @@ func defaults() *types.Config {
 		CacheDir:           filepath.Join(home, ".tmux-claude-matrix/.cache"),
 		CacheTTL:           30 * time.Minute, // Increased from 5m to 30m for better performance
 		SessionsDir:        filepath.Join(home, ".tmux-claude-matrix/sessions"),
+		StaleThreshold:     15 * time.Minute,
 	}
 }
 
@@ -154,6 +155,12 @@ func applyConfigValue(cfg *types.Config, key, value string) {
 		cfg.WorkspacesEnabled = value == "1" || value == "true"
 	case "WORKSPACES_FILE":
 		cfg.WorkspacesFile = value
+	case "STALE_THRESHOLD":
+		if minutes, err := strconv.Atoi(value); err == nil && minutes > 0 {
+			cfg.StaleThreshold = time.Duration(minutes) * time.Minute
+		}
+	case "DEBUG":
+		cfg.Debug = value == "1" || value == "true"
 	}
 }
 
@@ -204,6 +211,14 @@ func applyEnvOverrides(cfg *types.Config) {
 	}
 	if val := os.Getenv("TMUX_CLAUDE_MATRIX_WORKSPACES_FILE"); val != "" {
 		cfg.WorkspacesFile = val
+	}
+	if val := os.Getenv("CLAUDE_MATRIX_STALE_THRESHOLD"); val != "" {
+		if minutes, err := strconv.Atoi(val); err == nil && minutes > 0 {
+			cfg.StaleThreshold = time.Duration(minutes) * time.Minute
+		}
+	}
+	if val := os.Getenv("CLAUDE_MATRIX_DEBUG"); val != "" {
+		cfg.Debug = val == "1" || val == "true"
 	}
 }
 

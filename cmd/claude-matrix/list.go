@@ -76,11 +76,12 @@ func runList(_ context.Context) error {
 
 			// Check Claude status if session is active
 			if sessStatus.TmuxActive {
-				sessStatus.ClaudeRunning = tmuxMgr.GetClaudeStatus(sess.Name)
-				// Get detailed state
-				state, lastActivity := tmuxMgr.GetDetailedClaudeState(sess.Name)
+				state, lastActivity := tmuxMgr.GetDetailedClaudeState(sess.Name, cfg.StaleThreshold)
 				sessStatus.ClaudeState = state
 				sessStatus.LastActivity = lastActivity
+				sessStatus.ClaudeRunning = state == types.ClaudeStateRunning ||
+					state == types.ClaudeStateWaitingForInput ||
+					state == types.ClaudeStateIdle
 			}
 
 			statusList = append(statusList, sessStatus)

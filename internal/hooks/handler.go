@@ -2,8 +2,10 @@ package hooks
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/mateimicu/tmux-claude-matrix/internal/status"
 	"github.com/mateimicu/tmux-claude-matrix/internal/tmux"
@@ -15,6 +17,11 @@ type HookEvent struct {
 	HookEventName    string `json:"hook_event_name"`
 	NotificationType string `json:"notification_type,omitempty"`
 	SessionID        string `json:"session_id"`
+}
+
+// Logger is an interface for debug logging.
+type Logger interface {
+	Printf(format string, v ...interface{})
 }
 
 // MapEventToState maps a hook event to its corresponding ClaudeState.
@@ -45,7 +52,8 @@ func MapEventToState(event *HookEvent) types.ClaudeState {
 }
 
 // HandleHookEvent reads a hook event from stdin and updates tmux state accordingly.
-func HandleHookEvent(reader io.Reader, mgr *tmux.Manager) error {
+// It uses per-agent state tracking keyed by the event's session_id.
+func HandleHookEvent(reader io.Reader, mgr *tmux.Manager, staleThreshold time.Duration, logger Logger) error {
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		return err
@@ -58,9 +66,13 @@ func HandleHookEvent(reader io.Reader, mgr *tmux.Manager) error {
 
 	state := MapEventToState(&event)
 
+	if logger != nil {
+		logger.Printf("event=%s session_id=%s state=%s", event.HookEventName, event.SessionID, state)
+	}
+
 	tmuxPane := os.Getenv("TMUX_PANE")
 	if tmuxPane == "" {
-		return nil
+		return fmt.Errorf("TMUX_PANE environment variable is not set; hook handler requires a tmux pane context")
 	}
 
 	sessionName, err := mgr.GetSessionNameFromPane(tmuxPane)
@@ -68,24 +80,47 @@ func HandleHookEvent(reader io.Reader, mgr *tmux.Manager) error {
 		return err
 	}
 
+	if logger != nil {
+		logger.Printf("tmux_pane=%s session_name=%s", tmuxPane, sessionName)
+	}
+
 	statusDir := status.DefaultStatusDir()
 
 	if state == types.ClaudeStateStopped {
-		// Reset window name to plain "claude" before removing state
-		_ = mgr.RenameWindowByPane(tmuxPane, "claude") //nolint:errcheck // Best-effort reset
-		return status.RemoveState(statusDir, sessionName)
+		if err := status.RemoveAgentState(statusDir, sessionName, event.SessionID); err != nil {
+			return err
+		}
+
+		// Read remaining state to compute aggregate for window name
+		sf, err := status.ReadStateFile(statusDir, sessionName)
+		if err != nil {
+			// File was removed (last agent) — show stopped
+			if logger != nil {
+				logger.Printf("last agent removed, setting window to stopped")
+			}
+			return mgr.RenameWindowByPane(tmuxPane, status.EmojiForState(types.ClaudeStateStopped)+"claude")
+		}
+
+		aggregate, _ := status.ComputeState(sf, staleThreshold)
+		if logger != nil {
+			logger.Printf("aggregate_state=%s (after agent removal)", aggregate)
+		}
+		return mgr.RenameWindowByPane(tmuxPane, status.EmojiForState(aggregate)+"claude")
 	}
 
-	// Read current state to avoid unnecessary tmux rename
-	current, err := status.ReadState(statusDir, sessionName)
-	if err == nil && current.State == string(state) && current.SessionID == event.SessionID {
-		return nil
-	}
-
-	if err := status.WriteState(statusDir, sessionName, state, event.SessionID); err != nil {
+	if err := status.UpdateAgentState(statusDir, sessionName, event.SessionID, state); err != nil {
 		return err
 	}
 
-	emoji := status.EmojiForState(state)
-	return mgr.RenameWindowByPane(tmuxPane, emoji+"claude")
+	// Compute aggregate state for window name
+	sf, err := status.ReadStateFile(statusDir, sessionName)
+	if err != nil {
+		return err
+	}
+
+	aggregate, _ := status.ComputeState(sf, staleThreshold)
+	if logger != nil {
+		logger.Printf("aggregate_state=%s", aggregate)
+	}
+	return mgr.RenameWindowByPane(tmuxPane, status.EmojiForState(aggregate)+"claude")
 }
