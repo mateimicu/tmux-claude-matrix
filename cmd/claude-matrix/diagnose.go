@@ -4,13 +4,17 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mateimicu/tmux-claude-matrix/internal/config"
+	"github.com/mateimicu/tmux-claude-matrix/internal/hooks"
 	"github.com/mateimicu/tmux-claude-matrix/internal/repos"
+	"github.com/mateimicu/tmux-claude-matrix/internal/status"
+	"github.com/mateimicu/tmux-claude-matrix/internal/tmux"
 )
 
 func diagnoseCmd() *cobra.Command {
@@ -36,6 +40,15 @@ func runDiagnose(ctx context.Context) error {
 
 	fmt.Println("✓ Configuration loaded successfully")
 	fmt.Println()
+
+	// --- New diagnostic sections (hooks, state, sessions, env) ---
+
+	diagnoseHookRegistration()
+	diagnoseStateFiles(cfg.StaleThreshold)
+	diagnoseTmuxSessions()
+	diagnoseEnvironment(cfg.StaleThreshold)
+
+	// --- Existing repository diagnostic sections ---
 
 	// Show configuration
 	fmt.Println("📋 Configuration:")
@@ -172,4 +185,135 @@ func runDiagnose(ctx context.Context) error {
 	fmt.Println("For more help, see: https://github.com/mateimicu/tmux-claude-matrix")
 
 	return nil
+}
+
+// diagnoseHookRegistration checks hook registration status.
+func diagnoseHookRegistration() {
+	fmt.Println("🪝 Hook Registration:")
+
+	// Find binary path
+	binaryPath, err := os.Executable()
+	if err != nil {
+		fmt.Printf("  ❌ Could not determine binary path: %v\n", err)
+		fmt.Println()
+		return
+	}
+
+	fmt.Printf("  Binary: %s\n", binaryPath)
+	if _, err := os.Stat(binaryPath); err != nil {
+		fmt.Printf("  ❌ Binary not found at path\n")
+	} else {
+		fmt.Printf("  ✓ Binary exists\n")
+	}
+
+	missing, err := hooks.MissingHookEvents(binaryPath)
+	if err != nil {
+		fmt.Printf("  ❌ Error checking hooks: %v\n", err)
+		fmt.Println()
+		return
+	}
+
+	if len(missing) == 0 {
+		fmt.Println("  ✓ All hook events registered")
+	} else {
+		fmt.Printf("  ❌ Missing hook events: %s\n", strings.Join(missing, ", "))
+		fmt.Println("  Fix with: claude-matrix setup-hooks")
+	}
+	fmt.Println()
+}
+
+// diagnoseStateFiles lists state files and their per-agent entries.
+func diagnoseStateFiles(staleThreshold time.Duration) {
+	fmt.Println("📄 State Files:")
+
+	statusDir := status.DefaultStatusDir()
+	entries, err := os.ReadDir(statusDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("  No state directory found (no active sessions)")
+		} else {
+			fmt.Printf("  ❌ Error reading status dir: %v\n", err)
+		}
+		fmt.Println()
+		return
+	}
+
+	stateFiles := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".state") {
+			stateFiles++
+			sessionName := strings.TrimSuffix(entry.Name(), ".state")
+			fmt.Printf("  Session: %s\n", sessionName)
+
+			sf, err := status.ReadStateFile(statusDir, sessionName)
+			if err != nil {
+				fmt.Printf("    ❌ Error reading: %v\n", err)
+				continue
+			}
+
+			for agentID, agent := range sf.Agents {
+				age := time.Since(agent.UpdatedAt).Truncate(time.Second)
+				stale := ""
+				if time.Since(agent.UpdatedAt) > staleThreshold {
+					stale = " (STALE)"
+				}
+				fmt.Printf("    Agent %s: state=%s, age=%s%s\n", agentID, agent.State, age, stale)
+			}
+
+			aggregate, _ := status.ComputeState(sf, staleThreshold)
+			fmt.Printf("    Aggregate: %s %s\n", status.EmojiForState(aggregate), aggregate)
+		}
+	}
+
+	if stateFiles == 0 {
+		fmt.Println("  No state files found")
+	}
+	fmt.Println()
+}
+
+// diagnoseTmuxSessions lists active tmux sessions.
+func diagnoseTmuxSessions() {
+	fmt.Println("🖥️  Active Tmux Sessions:")
+
+	mgr := tmux.New()
+	sessions, err := mgr.ListSessions()
+	if err != nil {
+		fmt.Printf("  ❌ Error listing sessions: %v\n", err)
+		fmt.Println()
+		return
+	}
+
+	if len(sessions) == 0 {
+		fmt.Println("  No active tmux sessions")
+	} else {
+		for _, name := range sessions {
+			fmt.Printf("  - %s\n", name)
+		}
+	}
+	fmt.Println()
+}
+
+// diagnoseEnvironment shows relevant environment variables.
+func diagnoseEnvironment(staleThreshold time.Duration) {
+	fmt.Println("🔧 Environment:")
+	fmt.Printf("  TMUX_PANE: %s\n", envOrEmpty("TMUX_PANE"))
+	fmt.Printf("  CLAUDE_MATRIX_DEBUG: %s\n", envOrEmpty("CLAUDE_MATRIX_DEBUG"))
+	fmt.Printf("  CLAUDE_MATRIX_STALE_THRESHOLD: %s\n", envOrEmpty("CLAUDE_MATRIX_STALE_THRESHOLD"))
+	fmt.Printf("  Configured stale threshold: %s\n", staleThreshold)
+
+	settingsPath := filepath.Join(os.Getenv("HOME"), ".claude/settings.json")
+	if _, err := os.Stat(settingsPath); err == nil {
+		fmt.Printf("  Claude settings file: ✓ %s\n", settingsPath)
+	} else {
+		fmt.Printf("  Claude settings file: ❌ not found at %s\n", settingsPath)
+	}
+	fmt.Println()
+}
+
+func envOrEmpty(key string) string {
+	val := os.Getenv(key)
+	if val == "" {
+		return "(not set)"
+	}
+	return val
 }

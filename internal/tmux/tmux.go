@@ -130,17 +130,6 @@ func (m *Manager) SelectWindow(session, window string) error {
 	return cmd.Run()
 }
 
-// isValidClaudeState returns true if the state is a known ClaudeState constant.
-func isValidClaudeState(s types.ClaudeState) bool {
-	switch s {
-	case types.ClaudeStateIdle, types.ClaudeStateRunning,
-		types.ClaudeStateWaitingForInput, types.ClaudeStateStopped,
-		types.ClaudeStateError, types.ClaudeStateUnknown:
-		return true
-	}
-	return false
-}
-
 // stripEmojiPrefix removes known status emoji prefixes from a window name.
 func stripEmojiPrefix(name string) string {
 	prefixes := []string{"🟢", "❓", "❔", "💬", "⚫", "⚠️", "💤", "⏸️"}

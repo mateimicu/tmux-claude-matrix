@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mateimicu/tmux-claude-matrix/internal/config"
+	"github.com/mateimicu/tmux-claude-matrix/internal/debug"
 	"github.com/mateimicu/tmux-claude-matrix/internal/hooks"
 	"github.com/mateimicu/tmux-claude-matrix/internal/tmux"
 	"github.com/mateimicu/tmux-claude-matrix/pkg/types"
@@ -30,7 +31,18 @@ func hookHandlerCmd() *cobra.Command {
 				staleThreshold = 15 * time.Minute
 			}
 
-			if err := hooks.HandleHookEvent(os.Stdin, tmux.New(), staleThreshold, nil); err != nil {
+			var logger hooks.Logger
+			debugLogger, err := debug.NewLogger(cfg.Debug, debug.DefaultLogPath())
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "hook-handler: debug logger error: %v\n", err)
+			} else {
+				defer debugLogger.Close()
+				if cfg.Debug {
+					logger = debugLogger
+				}
+			}
+
+			if err := hooks.HandleHookEvent(os.Stdin, tmux.New(), staleThreshold, logger); err != nil {
 				fmt.Fprintf(os.Stderr, "hook-handler: %v\n", err)
 				return err
 			}
