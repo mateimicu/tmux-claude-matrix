@@ -103,31 +103,56 @@ func removeHooksFromFile(settingsPath string) error {
 	return writeSettingsFile(settingsPath, settings)
 }
 
-// isSetupInFile checks if our hooks are present in the given settings file.
+// isSetupInFile checks if our hooks are present for ALL events in the given settings file.
 func isSetupInFile(binaryPath, settingsPath string) (bool, error) {
-	settings, err := readSettingsFile(settingsPath)
+	missing, err := missingHookEventsInFile(binaryPath, settingsPath)
 	if err != nil {
 		return false, err
+	}
+	return len(missing) == 0, nil
+}
+
+// MissingHookEvents returns the list of event names not registered in the settings file.
+// Returns nil if all events are registered.
+func MissingHookEvents(binaryPath string) ([]string, error) {
+	return missingHookEventsInFile(binaryPath, SettingsPath())
+}
+
+// missingHookEventsInFile returns the list of event names not registered in the given settings file.
+func missingHookEventsInFile(binaryPath, settingsPath string) ([]string, error) {
+	settings, err := readSettingsFile(settingsPath)
+	if err != nil {
+		return nil, err
 	}
 
 	hooksRaw, ok := settings["hooks"]
 	if !ok {
-		return false, nil
+		// No hooks at all — all events are missing
+		missing := make([]string, len(hookEventDefs))
+		for i, def := range hookEventDefs {
+			missing[i] = def.event
+		}
+		return missing, nil
 	}
 	hooks, ok := hooksRaw.(map[string]interface{})
 	if !ok {
-		return false, nil
+		missing := make([]string, len(hookEventDefs))
+		for i, def := range hookEventDefs {
+			missing[i] = def.event
+		}
+		return missing, nil
 	}
 
 	command := binaryPath + " hook-handler " + hookMarker
+	var missing []string
 	for _, def := range hookEventDefs {
 		entries := getEventEntries(hooks, def.event)
-		if hasOurHook(entries, command) {
-			return true, nil
+		if !hasOurHook(entries, command) {
+			missing = append(missing, def.event)
 		}
 	}
 
-	return false, nil
+	return missing, nil
 }
 
 // readSettingsFile reads and parses the settings JSON file.
