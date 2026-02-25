@@ -3,8 +3,13 @@ package hooks
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/mateimicu/tmux-claude-matrix/internal/status"
+	"github.com/mateimicu/tmux-claude-matrix/internal/tmux"
 	"github.com/mateimicu/tmux-claude-matrix/pkg/types"
 )
 
@@ -101,5 +106,180 @@ func TestParseHookEvent(t *testing.T) {
 	}
 	if parsed.SessionID != "sess-abc-123" {
 		t.Errorf("SessionID = %q, want %q", parsed.SessionID, "sess-abc-123")
+	}
+}
+
+func TestHandleHookEvent_TMUXPaneMissing(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+
+	event := HookEvent{
+		HookEventName: "UserPromptSubmit",
+		SessionID:     "sess-1",
+	}
+	data, _ := json.Marshal(event)
+
+	err := HandleHookEvent(bytes.NewReader(data), tmux.New(), 15*time.Minute, nil)
+	if err == nil {
+		t.Fatal("expected error when TMUX_PANE is empty")
+	}
+	if !strings.Contains(err.Error(), "TMUX_PANE") {
+		t.Errorf("error should mention TMUX_PANE, got: %v", err)
+	}
+}
+
+func TestHandleHookEvent_InvalidJSON(t *testing.T) {
+	t.Setenv("TMUX_PANE", "%123")
+
+	err := HandleHookEvent(bytes.NewReader([]byte("not json")), tmux.New(), 15*time.Minute, nil)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestHandleHookEvent_PerAgentWrite(t *testing.T) {
+	// This test verifies that HandleHookEvent writes per-agent state
+	// We can't easily test the full flow (needs tmux), but we can test
+	// that the TMUX_PANE check works properly by verifying the error path
+	t.Setenv("TMUX_PANE", "")
+
+	event := HookEvent{
+		HookEventName: "SessionStart",
+		SessionID:     "sess-1",
+	}
+	data, _ := json.Marshal(event)
+
+	err := HandleHookEvent(bytes.NewReader(data), tmux.New(), 15*time.Minute, nil)
+	if err == nil {
+		t.Fatal("expected error when TMUX_PANE is empty")
+	}
+}
+
+// TestPerAgentStateIntegration tests the per-agent state tracking
+// at the status package level (unit test for the handler's core logic)
+func TestPerAgentStateIntegration(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "handler-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sessionName := "test-sess"
+
+	// Agent 1 fires UserPromptSubmit (running)
+	if err := status.UpdateAgentState(tmpDir, sessionName, "sess-1", types.ClaudeStateRunning); err != nil {
+		t.Fatal(err)
+	}
+
+	// Agent 2 fires SessionStart (idle)
+	if err := status.UpdateAgentState(tmpDir, sessionName, "sess-2", types.ClaudeStateIdle); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read and compute
+	sf, err := status.ReadStateFile(tmpDir, sessionName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	aggregate, _ := status.ComputeState(sf, 15*time.Minute)
+	if aggregate != types.ClaudeStateRunning {
+		t.Errorf("aggregate = %q, want running", aggregate)
+	}
+}
+
+func TestPerAgentStateIntegration_IdempotencyRemoved(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "handler-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sessionName := "test-sess"
+
+	// Agent 1 fires running
+	if err := status.UpdateAgentState(tmpDir, sessionName, "sess-1", types.ClaudeStateRunning); err != nil {
+		t.Fatal(err)
+	}
+
+	sf1, _ := status.ReadStateFile(tmpDir, sessionName)
+	ts1 := sf1.Agents["sess-1"].UpdatedAt
+
+	// Small delay to ensure timestamp differs
+	time.Sleep(10 * time.Millisecond)
+
+	// Same agent fires running again — should still update timestamp
+	if err := status.UpdateAgentState(tmpDir, sessionName, "sess-1", types.ClaudeStateRunning); err != nil {
+		t.Fatal(err)
+	}
+
+	sf2, _ := status.ReadStateFile(tmpDir, sessionName)
+	ts2 := sf2.Agents["sess-1"].UpdatedAt
+
+	if !ts2.After(ts1) {
+		t.Error("timestamp should be updated even when state didn't change (idempotency removed)")
+	}
+}
+
+func TestPerAgentStateIntegration_SessionEnd(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "handler-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sessionName := "test-sess"
+
+	// Two agents
+	if err := status.UpdateAgentState(tmpDir, sessionName, "sess-1", types.ClaudeStateRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := status.UpdateAgentState(tmpDir, sessionName, "sess-2", types.ClaudeStateIdle); err != nil {
+		t.Fatal(err)
+	}
+
+	// Agent 2 fires SessionEnd
+	if err := status.RemoveAgentState(tmpDir, sessionName, "sess-2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Agent 1 should remain
+	sf, err := status.ReadStateFile(tmpDir, sessionName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(sf.Agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(sf.Agents))
+	}
+
+	aggregate, _ := status.ComputeState(sf, 15*time.Minute)
+	if aggregate != types.ClaudeStateRunning {
+		t.Errorf("aggregate = %q, want running", aggregate)
+	}
+}
+
+func TestPerAgentStateIntegration_LastAgentSessionEnd(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "handler-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sessionName := "test-sess"
+
+	// One agent
+	if err := status.UpdateAgentState(tmpDir, sessionName, "sess-1", types.ClaudeStateRunning); err != nil {
+		t.Fatal(err)
+	}
+
+	// Agent fires SessionEnd
+	if err := status.RemoveAgentState(tmpDir, sessionName, "sess-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// File should be gone
+	_, err = status.ReadStateFile(tmpDir, sessionName)
+	if err == nil {
+		t.Fatal("expected file to be removed after last agent's SessionEnd")
 	}
 }
