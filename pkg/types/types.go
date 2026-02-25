@@ -60,7 +60,9 @@ type Config struct {
 	GitHubOrgs         []string
 	ClaudeArgs         []string
 	CacheTTL           time.Duration
+	StaleThreshold     time.Duration
 	GitHubEnabled      bool
 	LocalConfigEnabled bool
 	WorkspacesEnabled  bool
+	Debug              bool
 }
