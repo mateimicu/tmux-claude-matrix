@@ -90,6 +90,11 @@ func buildClaudeWorktreeCmd(cfg *types.Config, worktreeName string) string {
 	return strings.Join(args, " ")
 }
 
+// worktreeNameFor builds a unique worktree name for a repo within a session.
+func worktreeNameFor(sessionName, repoName string) string {
+	return sessionName + "-" + strings.ReplaceAll(repoName, "/", "-")
+}
+
 func createRepoSession(cfg *types.Config, selected *types.Repository, sessionMgr *session.Manager, gitMgr *git.Manager, tmuxMgr *tmux.Manager, log *logging.Logger) error {
 	repoName := git.ExtractRepoName(selected.URL)
 	sessionName, err := sessionMgr.GenerateUniqueName(repoName)
@@ -105,6 +110,13 @@ func createRepoSession(cfg *types.Config, selected *types.Repository, sessionMgr
 	}
 	log.Debugf("✓ Base repo ready at %s\n", baseRepoPath)
 
+	// Launch claude --worktree inside tmux; Claude Code creates and manages the worktree
+	claudeCmd := buildClaudeWorktreeCmd(cfg, sessionName)
+	log.Debugf("🚀 Creating tmux session '%s'...\n", sessionName)
+	if err := tmuxMgr.CreateSession(sessionName, baseRepoPath, claudeCmd); err != nil {
+		return fmt.Errorf("failed to create tmux session: %w", err)
+	}
+
 	sess := &types.Session{
 		Name:         sessionName,
 		RepoURL:      selected.URL,
@@ -112,10 +124,7 @@ func createRepoSession(cfg *types.Config, selected *types.Repository, sessionMgr
 		BaseRepoPath: baseRepoPath,
 		CreatedAt:    time.Now(),
 	}
-
-	// Launch claude --worktree inside tmux; Claude Code creates and manages the worktree
-	claudeCmd := buildClaudeWorktreeCmd(cfg, sessionName)
-	return finalizeSession(sess, baseRepoPath, claudeCmd, sessionMgr, tmuxMgr, log)
+	return saveAndSwitch(sess, sessionMgr, tmuxMgr, log)
 }
 
 func createWorkspaceSession(cfg *types.Config, selected *types.Repository, sessionMgr *session.Manager, gitMgr *git.Manager, tmuxMgr *tmux.Manager, log *logging.Logger) error {
@@ -145,8 +154,7 @@ func createWorkspaceSession(cfg *types.Config, selected *types.Repository, sessi
 
 	// First repo gets the main tmux session window
 	first := repoInfos[0]
-	worktreeName := sessionName + "-" + strings.ReplaceAll(first.name, "/", "-")
-	claudeCmd := buildClaudeWorktreeCmd(cfg, worktreeName)
+	claudeCmd := buildClaudeWorktreeCmd(cfg, worktreeNameFor(sessionName, first.name))
 
 	log.Debugf("🚀 Creating tmux session '%s'...\n", sessionName)
 	if err := tmuxMgr.CreateSession(sessionName, first.basePath, claudeCmd); err != nil {
@@ -155,8 +163,7 @@ func createWorkspaceSession(cfg *types.Config, selected *types.Repository, sessi
 
 	// Remaining repos each get a new tmux window
 	for _, ri := range repoInfos[1:] {
-		wName := sessionName + "-" + strings.ReplaceAll(ri.name, "/", "-")
-		cmd := buildClaudeWorktreeCmd(cfg, wName)
+		cmd := buildClaudeWorktreeCmd(cfg, worktreeNameFor(sessionName, ri.name))
 		if err := tmuxMgr.CreateWindow(sessionName, ri.name, cmd, ri.basePath); err != nil {
 			log.Warnf("⚠️  Failed to create window for %s: %v\n", ri.name, err)
 		}
@@ -169,31 +176,11 @@ func createWorkspaceSession(cfg *types.Config, selected *types.Repository, sessi
 		RepoURLs:  selected.WorkspaceRepos,
 		CreatedAt: time.Now(),
 	}
-	if err := sessionMgr.Save(sess); err != nil {
-		log.Warnf("⚠️  Failed to save session metadata: %v\n", err)
-	}
-
-	if err := tmuxMgr.SetSessionEnv(sessionName, "@claude-matrix-title", sessionName); err != nil {
-		log.Warnf("⚠️  Failed to set session title env: %v\n", err)
-	}
-
-	fmt.Printf("✓ Workspace session created: %s (%d windows)\n", sessionName, len(repoInfos))
-
-	if err := tmuxMgr.SwitchToSession(sessionName); err != nil {
-		log.Warnf("⚠️  Failed to switch to session: %v\n", err)
-		log.Warnf("You can attach manually with: tmux attach -t %s\n", sessionName)
-	}
-
-	return nil
+	return saveAndSwitch(sess, sessionMgr, tmuxMgr, log)
 }
 
-// finalizeSession creates the tmux session, saves metadata, and switches to it.
-func finalizeSession(sess *types.Session, workDir, claudeCmd string, sessionMgr *session.Manager, tmuxMgr *tmux.Manager, log *logging.Logger) error {
-	log.Debugf("🚀 Creating tmux session '%s'...\n", sess.Name)
-	if err := tmuxMgr.CreateSession(sess.Name, workDir, claudeCmd); err != nil {
-		return fmt.Errorf("failed to create tmux session: %w", err)
-	}
-
+// saveAndSwitch persists session metadata, sets tmux env, and switches to the session.
+func saveAndSwitch(sess *types.Session, sessionMgr *session.Manager, tmuxMgr *tmux.Manager, log *logging.Logger) error {
 	if err := sessionMgr.Save(sess); err != nil {
 		log.Warnf("⚠️  Failed to save session metadata: %v\n", err)
 	}
