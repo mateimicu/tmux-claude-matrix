@@ -35,8 +35,8 @@ func flattenRepoURLs(repoList []*types.Repository) []string {
 	return urls
 }
 
-// runPrefillCache discovers all configured repositories and creates/updates
-// mirror caches for each one.
+// runPrefillCache discovers all configured repositories and ensures base clones
+// exist for each one, so that worktree creation is fast.
 func runPrefillCache(ctx context.Context, cfg *types.Config) error {
 	// Build sources (suppress log output during pre-fill)
 	sources, err := buildSources(ctx, cfg, logging.New(false))
@@ -55,47 +55,40 @@ func runPrefillCache(ctx context.Context, cfg *types.Config) error {
 
 	urls := flattenRepoURLs(repoList)
 	if len(urls) == 0 {
-		fmt.Println("No repositories found to cache.")
+		fmt.Println("No repositories found to prefill.")
 		return nil
 	}
 
-	fmt.Printf("Found %d repositories to cache.\n\n", len(urls))
+	fmt.Printf("Found %d repositories to prefill.\n\n", len(urls))
 
 	gitMgr := git.New()
-	var newCount, updatedCount, failedCount int
+	var successCount, failedCount int
 	total := len(urls)
 
 	for i, url := range urls {
-		// Check for cancellation between repos
 		select {
 		case <-ctx.Done():
-			fmt.Printf("\n⚠️  Cancelled. Partial summary: Total: %d | New: %d | Updated: %d | Failed: %d\n",
-				i, newCount, updatedCount, failedCount)
+			fmt.Printf("\n⚠️  Cancelled. Partial summary: Total: %d | OK: %d | Failed: %d\n",
+				i, successCount, failedCount)
 			return nil
 		default:
 		}
 
 		repoName := git.ExtractRepoName(url)
-		fmt.Printf("[%d/%d] Caching mirror: %s...\n", i+1, total, repoName)
+		fmt.Printf("[%d/%d] Ensuring base repo: %s...\n", i+1, total, repoName)
 
-		created, err := gitMgr.EnsureMirror(url, cfg.CacheDir)
-		if err != nil {
+		if _, err := gitMgr.EnsureBaseRepo(url, cfg.BaseRepoDir); err != nil {
 			fmt.Printf("[%d/%d] ✗ %s: %v\n", i+1, total, repoName, err)
 			failedCount++
 			continue
 		}
 
-		if created {
-			fmt.Printf("[%d/%d] ✓ %s (new)\n", i+1, total, repoName)
-			newCount++
-		} else {
-			fmt.Printf("[%d/%d] ✓ %s (updated)\n", i+1, total, repoName)
-			updatedCount++
-		}
+		fmt.Printf("[%d/%d] ✓ %s\n", i+1, total, repoName)
+		successCount++
 	}
 
-	fmt.Printf("\nTotal: %d | New: %d | Updated: %d | Failed: %d\n",
-		total, newCount, updatedCount, failedCount)
+	fmt.Printf("\nTotal: %d | OK: %d | Failed: %d\n",
+		total, successCount, failedCount)
 
 	return nil
 }

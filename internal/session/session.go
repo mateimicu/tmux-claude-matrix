@@ -36,7 +36,7 @@ func (m *Manager) Save(s *types.Session) error {
 	return os.WriteFile(path, data, 0644)
 }
 
-// Load reads session metadata from disk
+// Load reads session metadata from disk.
 func (m *Manager) Load(name string) (*types.Session, error) {
 	path := filepath.Join(m.metadataDir, name+".json")
 	data, err := os.ReadFile(path)

@@ -1,6 +1,7 @@
 package git
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,101 +16,49 @@ func New() *Manager {
 	return &Manager{}
 }
 
-// Clone clones a repository to the specified path
-func (m *Manager) Clone(url, path string) error {
-	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
+// EnsureBaseRepo ensures a base clone exists for the given URL. If the repo
+// is already cloned at baseRepoDir/safeName, it fetches updates. Otherwise
+// it performs a fresh clone. Returns the path to the base repo.
+func (m *Manager) EnsureBaseRepo(url, baseRepoDir string) (string, error) {
+	repoPath := GetBaseRepoPath(url, baseRepoDir)
+
+	if isGitRepo(repoPath) {
+		cmd := exec.Command("git", "-C", repoPath, "fetch", "--all", "--prune")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return repoPath, fmt.Errorf("failed to fetch updates for %s: %w", repoPath, err)
+		}
+		return repoPath, nil
 	}
 
-	cmd := exec.Command("git", "clone", url, path)
+	if err := os.MkdirAll(filepath.Dir(repoPath), 0755); err != nil {
+		return "", err
+	}
+	cmd := exec.Command("git", "clone", url, repoPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to clone %s: %w", url, err)
+	}
+	return repoPath, nil
 }
 
-// CloneWithCache clones a repository using a local mirror cache for faster cloning
-func (m *Manager) CloneWithCache(url, path, cacheDir string) error {
-	if _, err := m.EnsureMirror(url, cacheDir); err != nil {
-		return err
-	}
-
-	mirrorPath := m.GetMirrorPath(url, cacheDir)
-	return m.cloneWithReference(url, path, mirrorPath)
-}
-
-// EnsureMirror creates a new mirror if one doesn't exist, or updates (fetch --prune)
-// an existing mirror. Returns created=true if a new mirror was created, created=false
-// if an existing mirror was updated.
-func (m *Manager) EnsureMirror(url, cacheDir string) (created bool, err error) {
-	mirrorPath := m.GetMirrorPath(url, cacheDir)
-
-	if !m.MirrorExists(mirrorPath) {
-		if err := m.createMirror(url, mirrorPath); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-
-	if err := m.updateMirror(mirrorPath); err != nil {
-		return false, err
-	}
-	return false, nil
-}
-
-// GetMirrorPath returns the path where the mirror cache should be stored
-func (m *Manager) GetMirrorPath(url, cacheDir string) string {
-	// Extract org/repo and convert to filesystem-safe name
+// GetBaseRepoPath returns the filesystem path where a base clone is stored.
+func GetBaseRepoPath(url, baseRepoDir string) string {
 	repoName := ExtractRepoName(url)
 	safeName := strings.ReplaceAll(repoName, "/", "-")
-	return filepath.Join(cacheDir, "mirrors", safeName)
+	return filepath.Join(baseRepoDir, safeName)
 }
 
-// MirrorExists checks if a mirror cache exists at the given path
-func (m *Manager) MirrorExists(path string) bool {
-	info, err := os.Stat(path)
+// isGitRepo checks if the path is an existing git repository.
+func isGitRepo(path string) bool {
+	info, err := os.Stat(filepath.Join(path, ".git"))
 	if err != nil {
 		return false
 	}
-	return info.IsDir()
-}
-
-// createMirror creates a new mirror cache of the repository
-func (m *Manager) createMirror(url, path string) error {
-	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-
-	cmd := exec.Command("git", "clone", "--mirror", url, path)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
-}
-
-// updateMirror fetches the latest objects into an existing mirror
-func (m *Manager) updateMirror(path string) error {
-	cmd := exec.Command("git", "-C", path, "fetch", "--prune")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
-}
-
-// cloneWithReference clones using an existing mirror as reference
-func (m *Manager) cloneWithReference(url, path, reference string) error {
-	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-
-	cmd := exec.Command("git", "clone", "--reference", reference, "--dissociate", url, path)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
+	// .git can be a file (worktree) or directory (regular repo)
+	return info != nil
 }
 
 // ExtractRepoName extracts org/repo from a git URL

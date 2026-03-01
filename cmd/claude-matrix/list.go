@@ -202,12 +202,10 @@ func handleSwitchAction(cfg *types.Config, tmuxMgr *tmux.Manager, selected *type
 	if !selected.TmuxActive {
 		log.Warnf("⚠️  Session not active, recreating...\n")
 
-		var claudeCmd string
-		if cfg.ClaudeBin != "" {
-			claudeCmd = cfg.ClaudeBin + " " + strings.Join(cfg.ClaudeArgs, " ")
-		}
+		claudeCmd := buildClaudeWorktreeCmd(cfg, selected.Session.Name)
+		workDir := selected.Session.BaseRepoPath
 
-		if err := tmuxMgr.CreateSession(selected.Session.Name, selected.Session.ClonePath, claudeCmd); err != nil {
+		if err := tmuxMgr.CreateSession(selected.Session.Name, workDir, claudeCmd); err != nil {
 			return fmt.Errorf("failed to recreate session: %w", err)
 		}
 	}

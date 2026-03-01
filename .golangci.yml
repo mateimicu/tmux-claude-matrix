@@ -1,3 +1,5 @@
+version: "2"
+
 run:
   timeout: 5m
   tests: true
@@ -6,17 +8,44 @@ run:
 linters:
   enable:
     - errcheck      # Check for unchecked errors
-    - gosimple      # Simplify code
     - govet         # Examine Go source code and reports suspicious constructs
     - ineffassign   # Detect ineffectual assignments
-    - staticcheck   # State-of-the-art linter
+    - staticcheck   # State-of-the-art linter (includes gosimple)
     - unused        # Check for unused constants, variables, functions and types
-    - gofmt         # Check whether code was gofmt-ed
-    - goimports     # Check import statements are formatted
     - misspell      # Check for misspelled English words
     - revive        # Fast, configurable, extensible, flexible, and beautiful linter
     - unparam       # Reports unused function parameters
     - gocritic      # Provides diagnostics that check for bugs, performance and style issues
+
+  exclusions:
+    rules:
+      # Exclude some linters from running on test files
+      - path: _test\.go
+        linters:
+          - errcheck
+          - unparam
+      # Cobra command handlers require specific signatures
+      - text: "unused-parameter"
+        linters:
+          - revive
+      # Package comments not required for internal packages
+      - text: "package-comments"
+        linters:
+          - revive
+      # pkg/types is an established package name
+      - text: "var-naming: avoid meaningless package names"
+        path: pkg/types/
+        linters:
+          - revive
+
+formatters:
+  enable:
+    - gofmt         # Check whether code was gofmt-ed
+    - goimports     # Check import statements are formatted
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/mateimicu/tmux-claude-matrix
 
 linters-settings:
   errcheck:
@@ -26,8 +55,8 @@ linters-settings:
   govet:
     enable-all: true
     disable:
-      - shadow        # Reports variables that shadow other variables
-      - fieldalignment # Field alignment is a micro-optimization that can reduce code readability
+      - shadow
+      - fieldalignment
 
   revive:
     rules:
@@ -36,21 +65,6 @@ linters-settings:
         arguments:
           - "checkPrivateReceivers"
           - "sayRepetitiveInsteadOfStutters"
-
-  goimports:
-    local-prefixes: github.com/mateimicu/tmux-claude-matrix
-
-issues:
-  exclude-use-default: false
-  max-issues-per-linter: 0
-  max-same-issues: 0
-
-  exclude-rules:
-    # Exclude some linters from running on tests files
-    - path: _test\.go
-      linters:
-        - errcheck
-        - unparam
 
 output:
   sort-results: true

@@ -1,6 +1,9 @@
 package types
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Repository represents a discovered repository or workspace
 type Repository struct {
@@ -14,12 +17,36 @@ type Repository struct {
 
 // Session represents a tmux session managed by matrix
 type Session struct {
-	CreatedAt time.Time `json:"created_at"`
-	Name      string    `json:"name"`
-	Title     string    `json:"title"`
-	RepoURL   string    `json:"repo_url"`
-	ClonePath string    `json:"clone_path"`
-	RepoURLs  []string  `json:"repo_urls,omitempty"` // Multiple repos for workspaces
+	CreatedAt    time.Time `json:"created_at"`
+	Name         string    `json:"name"`
+	Title        string    `json:"title"`
+	RepoURL      string    `json:"repo_url"`
+	BaseRepoPath string    `json:"base_repo_path,omitempty"`
+	RepoURLs     []string  `json:"repo_urls,omitempty"` // Multiple repos for workspaces
+}
+
+// UnmarshalJSON handles backward compatibility by migrating old fields
+// (clone_path, worktree_path) to BaseRepoPath when present.
+func (s *Session) UnmarshalJSON(data []byte) error {
+	type sessionAlias Session
+	aux := &struct {
+		ClonePath    string `json:"clone_path"`
+		WorktreePath string `json:"worktree_path"`
+		*sessionAlias
+	}{
+		sessionAlias: (*sessionAlias)(s),
+	}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	if s.BaseRepoPath == "" {
+		if aux.WorktreePath != "" {
+			s.BaseRepoPath = aux.WorktreePath
+		} else if aux.ClonePath != "" {
+			s.BaseRepoPath = aux.ClonePath
+		}
+	}
+	return nil
 }
 
 // ClaudeState represents the detailed state of a Claude process
@@ -51,7 +78,7 @@ type SessionStatus struct {
 
 // Config represents plugin configuration
 type Config struct {
-	CloneDir           string
+	BaseRepoDir        string
 	LocalReposFile     string
 	WorkspacesFile     string
 	ClaudeBin          string
