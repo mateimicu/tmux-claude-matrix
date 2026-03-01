@@ -53,80 +53,6 @@ func TestEnsureBaseRepo_FetchesExistingRepo(t *testing.T) {
 	}
 }
 
-func TestAddWorktree(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create a base repo with at least one commit
-	baseRepo := filepath.Join(tmpDir, "base")
-	initTestRepo(t, baseRepo)
-	addTestCommit(t, baseRepo)
-
-	worktreePath := filepath.Join(tmpDir, "worktrees", "test-wt")
-	m := New()
-
-	if err := m.AddWorktree(baseRepo, worktreePath, "worktree-test"); err != nil {
-		t.Fatalf("AddWorktree() error = %v", err)
-	}
-
-	// Worktree directory should exist and be a git checkout
-	if !isGitRepo(worktreePath) {
-		t.Error("expected worktree to be a git repo")
-	}
-}
-
-func TestRemoveWorktree(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	baseRepo := filepath.Join(tmpDir, "base")
-	initTestRepo(t, baseRepo)
-	addTestCommit(t, baseRepo)
-
-	worktreePath := filepath.Join(tmpDir, "worktrees", "test-wt")
-	m := New()
-
-	if err := m.AddWorktree(baseRepo, worktreePath, "worktree-rm-test"); err != nil {
-		t.Fatalf("AddWorktree() error = %v", err)
-	}
-
-	if err := m.RemoveWorktree(baseRepo, worktreePath); err != nil {
-		t.Fatalf("RemoveWorktree() error = %v", err)
-	}
-
-	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
-		t.Error("expected worktree directory to be removed")
-	}
-}
-
-func TestListWorktrees(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	baseRepo := filepath.Join(tmpDir, "base")
-	initTestRepo(t, baseRepo)
-	addTestCommit(t, baseRepo)
-
-	m := New()
-
-	// Add two worktrees
-	wt1 := filepath.Join(tmpDir, "worktrees", "wt1")
-	wt2 := filepath.Join(tmpDir, "worktrees", "wt2")
-	if err := m.AddWorktree(baseRepo, wt1, "branch-1"); err != nil {
-		t.Fatalf("AddWorktree(wt1) error = %v", err)
-	}
-	if err := m.AddWorktree(baseRepo, wt2, "branch-2"); err != nil {
-		t.Fatalf("AddWorktree(wt2) error = %v", err)
-	}
-
-	worktrees, err := m.ListWorktrees(baseRepo)
-	if err != nil {
-		t.Fatalf("ListWorktrees() error = %v", err)
-	}
-
-	// Should have 3: the base repo + 2 worktrees
-	if len(worktrees) != 3 {
-		t.Errorf("expected 3 worktrees, got %d", len(worktrees))
-	}
-}
-
 func TestGetBaseRepoPath(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -239,14 +165,5 @@ func initTestRepo(t *testing.T, path string) {
 		if err := exec.Command("git", "-C", path, "config", kv[0], kv[1]).Run(); err != nil {
 			t.Fatalf("git config %s failed: %v", kv[0], err)
 		}
-	}
-}
-
-// addTestCommit creates an empty commit in the repo.
-func addTestCommit(t *testing.T, repoPath string) {
-	t.Helper()
-	cmd := exec.Command("git", "-C", repoPath, "commit", "--allow-empty", "--no-gpg-sign", "-m", "test commit")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git commit failed: %v\n%s", err, output)
 	}
 }

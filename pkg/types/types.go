@@ -21,17 +21,17 @@ type Session struct {
 	Name         string    `json:"name"`
 	Title        string    `json:"title"`
 	RepoURL      string    `json:"repo_url"`
-	WorktreePath string    `json:"worktree_path"`
 	BaseRepoPath string    `json:"base_repo_path,omitempty"`
 	RepoURLs     []string  `json:"repo_urls,omitempty"` // Multiple repos for workspaces
 }
 
-// UnmarshalJSON handles backward compatibility by migrating the old
-// clone_path field to WorktreePath.
+// UnmarshalJSON handles backward compatibility by migrating old fields
+// (clone_path, worktree_path) to BaseRepoPath when present.
 func (s *Session) UnmarshalJSON(data []byte) error {
 	type sessionAlias Session
 	aux := &struct {
-		ClonePath string `json:"clone_path"`
+		ClonePath    string `json:"clone_path"`
+		WorktreePath string `json:"worktree_path"`
 		*sessionAlias
 	}{
 		sessionAlias: (*sessionAlias)(s),
@@ -39,8 +39,12 @@ func (s *Session) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, aux); err != nil {
 		return err
 	}
-	if s.WorktreePath == "" && aux.ClonePath != "" {
-		s.WorktreePath = aux.ClonePath
+	if s.BaseRepoPath == "" {
+		if aux.WorktreePath != "" {
+			s.BaseRepoPath = aux.WorktreePath
+		} else if aux.ClonePath != "" {
+			s.BaseRepoPath = aux.ClonePath
+		}
 	}
 	return nil
 }
@@ -75,7 +79,6 @@ type SessionStatus struct {
 // Config represents plugin configuration
 type Config struct {
 	BaseRepoDir        string
-	WorktreeDir        string
 	LocalReposFile     string
 	WorkspacesFile     string
 	ClaudeBin          string

@@ -44,7 +44,6 @@ func defaults() *types.Config {
 	home := os.Getenv("HOME")
 	return &types.Config{
 		BaseRepoDir:        filepath.Join(home, ".tmux-claude-matrix/repos"),
-		WorktreeDir:        filepath.Join(home, ".tmux-claude-matrix/worktrees"),
 		GitHubEnabled:      true,
 		GitHubOrgs:         []string{}, // Empty = all orgs
 		LocalConfigEnabled: true,
@@ -119,8 +118,6 @@ func applyConfigValue(cfg *types.Config, key, value string) {
 	switch key {
 	case "BASE_REPO_DIR", "CLONE_DIR":
 		cfg.BaseRepoDir = value
-	case "WORKTREE_DIR":
-		cfg.WorktreeDir = value
 	case "GITHUB_ENABLED":
 		cfg.GitHubEnabled = value == "1" || value == "true"
 	case "GITHUB_ORGS":
@@ -167,9 +164,6 @@ func applyEnvOverrides(cfg *types.Config) {
 		cfg.BaseRepoDir = val
 	} else if val := os.Getenv("TMUX_CLAUDE_MATRIX_CLONE_DIR"); val != "" {
 		cfg.BaseRepoDir = val
-	}
-	if val := os.Getenv("TMUX_CLAUDE_MATRIX_WORKTREE_DIR"); val != "" {
-		cfg.WorktreeDir = val
 	}
 	if val := os.Getenv("TMUX_CLAUDE_MATRIX_GITHUB_ENABLED"); val != "" {
 		cfg.GitHubEnabled = val == "1" || val == "true"
@@ -223,9 +217,6 @@ func applyEnvOverrides(cfg *types.Config) {
 func validate(cfg *types.Config) error {
 	if cfg.BaseRepoDir == "" {
 		return fmt.Errorf("base repo directory cannot be empty")
-	}
-	if cfg.WorktreeDir == "" {
-		return fmt.Errorf("worktree directory cannot be empty")
 	}
 	if cfg.SessionsDir == "" {
 		return fmt.Errorf("sessions directory cannot be empty")

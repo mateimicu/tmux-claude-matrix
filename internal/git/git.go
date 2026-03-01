@@ -1,7 +1,6 @@
 package git
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
@@ -43,64 +42,6 @@ func (m *Manager) EnsureBaseRepo(url, baseRepoDir string) (string, error) {
 		return "", fmt.Errorf("failed to clone %s: %w", url, err)
 	}
 	return repoPath, nil
-}
-
-// AddWorktree creates a new git worktree from the base repo at the given path
-// with a new branch named branchName.
-func (m *Manager) AddWorktree(baseRepoPath, worktreePath, branchName string) error {
-	if err := os.MkdirAll(filepath.Dir(worktreePath), 0755); err != nil {
-		return err
-	}
-	cmd := exec.Command("git", "-C", baseRepoPath, "worktree", "add", worktreePath, "-b", branchName)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-// RemoveWorktree removes a git worktree and its associated branch.
-func (m *Manager) RemoveWorktree(baseRepoPath, worktreePath string) error {
-	cmd := exec.Command("git", "-C", baseRepoPath, "worktree", "remove", "--force", worktreePath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-// WorktreeInfo holds metadata about a single worktree.
-type WorktreeInfo struct {
-	Path   string
-	Branch string
-}
-
-// ListWorktrees returns all worktrees for the given base repo.
-func (m *Manager) ListWorktrees(baseRepoPath string) ([]WorktreeInfo, error) {
-	cmd := exec.Command("git", "-C", baseRepoPath, "worktree", "list", "--porcelain")
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, err
-	}
-
-	var worktrees []WorktreeInfo
-	var current WorktreeInfo
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-	for scanner.Scan() {
-		line := scanner.Text()
-		switch {
-		case strings.HasPrefix(line, "worktree "):
-			current = WorktreeInfo{Path: strings.TrimPrefix(line, "worktree ")}
-		case strings.HasPrefix(line, "branch "):
-			current.Branch = strings.TrimPrefix(line, "branch refs/heads/")
-		case line == "":
-			if current.Path != "" {
-				worktrees = append(worktrees, current)
-				current = WorktreeInfo{}
-			}
-		}
-	}
-	// Flush last entry if output didn't end with blank line
-	if current.Path != "" {
-		worktrees = append(worktrees, current)
-	}
-	return worktrees, nil
 }
 
 // GetBaseRepoPath returns the filesystem path where a base clone is stored.

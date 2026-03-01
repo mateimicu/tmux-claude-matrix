@@ -25,7 +25,7 @@ func TestSessionManager(t *testing.T) {
 			Name:         "test-session",
 			Title:        "test/repo #1",
 			RepoURL:      "https://github.com/test/repo",
-			WorktreePath: "/tmp/test",
+			BaseRepoPath: "/tmp/test",
 			CreatedAt:    time.Now(),
 		}
 
@@ -104,7 +104,7 @@ func TestGenerateUniqueName(t *testing.T) {
 		sess := &types.Session{
 			Name:         name1,
 			RepoURL:      "https://github.com/test/repo",
-			WorktreePath: "/tmp/test",
+			BaseRepoPath: "/tmp/test",
 			CreatedAt:    time.Now(),
 		}
 		if err := mgr.Save(sess); err != nil {
@@ -156,9 +156,9 @@ func TestBackwardCompatibility_MissingTitle(t *testing.T) {
 	if sess.Name != "old-session" {
 		t.Errorf("expected name %q, got %q", "old-session", sess.Name)
 	}
-	// Old clone_path should migrate to WorktreePath
-	if sess.WorktreePath != "/tmp/old" {
-		t.Errorf("expected WorktreePath %q from old clone_path, got %q", "/tmp/old", sess.WorktreePath)
+	// Old clone_path should migrate to BaseRepoPath
+	if sess.BaseRepoPath != "/tmp/old" {
+		t.Errorf("expected BaseRepoPath %q from old clone_path, got %q", "/tmp/old", sess.BaseRepoPath)
 	}
 }
 
@@ -176,7 +176,7 @@ func TestRenameFlow(t *testing.T) {
 		Name:         "my-session",
 		Title:        "org/repo #1",
 		RepoURL:      "https://github.com/org/repo",
-		WorktreePath: "/tmp/test",
+		BaseRepoPath: "/tmp/test",
 		CreatedAt:    time.Now(),
 	}
 	if err := mgr.Save(sess); err != nil {
