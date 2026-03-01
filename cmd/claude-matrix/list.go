@@ -207,7 +207,7 @@ func handleSwitchAction(cfg *types.Config, tmuxMgr *tmux.Manager, selected *type
 			claudeCmd = cfg.ClaudeBin + " " + strings.Join(cfg.ClaudeArgs, " ")
 		}
 
-		if err := tmuxMgr.CreateSession(selected.Session.Name, selected.Session.ClonePath, claudeCmd); err != nil {
+		if err := tmuxMgr.CreateSession(selected.Session.Name, selected.Session.WorktreePath, claudeCmd); err != nil {
 			return fmt.Errorf("failed to recreate session: %w", err)
 		}
 	}

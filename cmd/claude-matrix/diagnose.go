@@ -34,7 +34,8 @@ func runDiagnose(ctx context.Context) error {
 
 	// Show configuration
 	fmt.Println("📋 Configuration:")
-	fmt.Printf("  Clone directory: %s\n", cfg.CloneDir)
+	fmt.Printf("  Base repo directory: %s\n", cfg.BaseRepoDir)
+	fmt.Printf("  Worktree directory: %s\n", cfg.WorktreeDir)
 	fmt.Printf("  Sessions directory: %s\n", cfg.SessionsDir)
 	fmt.Printf("  Cache directory: %s\n", cfg.CacheDir)
 	fmt.Printf("  Cache TTL: %s\n", cfg.CacheTTL)

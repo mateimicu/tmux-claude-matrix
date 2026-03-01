@@ -88,53 +88,32 @@ func createRepoSession(cfg *types.Config, selected *types.Repository, sessionMgr
 		return fmt.Errorf("failed to generate session name: %w", err)
 	}
 
-	clonePath := filepath.Join(cfg.CloneDir, sessionName)
-
-	if _, err := os.Stat(clonePath); err == nil {
-		log.Debugf("📦 Repository already exists at %s\n", clonePath)
-	} else {
-		log.Debugf("📦 Cloning %s (using cache for faster cloning)...\n", selected.URL)
-		if err := gitMgr.CloneWithCache(selected.URL, clonePath, cfg.CacheDir); err != nil {
-			return fmt.Errorf("failed to clone repository: %w", err)
-		}
-		log.Debugf("✓ Clone complete\n")
+	// Ensure we have a base clone of the repo
+	log.Debugf("📦 Ensuring base repo for %s...\n", selected.URL)
+	baseRepoPath, err := gitMgr.EnsureBaseRepo(selected.URL, cfg.BaseRepoDir)
+	if err != nil {
+		return fmt.Errorf("failed to ensure base repo: %w", err)
 	}
+	log.Debugf("✓ Base repo ready at %s\n", baseRepoPath)
 
-	var claudeCmd string
-	if cfg.ClaudeBin != "" {
-		claudeCmd = cfg.ClaudeBin + " " + strings.Join(cfg.ClaudeArgs, " ")
+	// Create a worktree for this session
+	worktreePath := filepath.Join(cfg.WorktreeDir, sessionName)
+	branchName := "worktree-" + sessionName
+	log.Debugf("🌿 Creating worktree at %s (branch: %s)...\n", worktreePath, branchName)
+	if err := gitMgr.AddWorktree(baseRepoPath, worktreePath, branchName); err != nil {
+		return fmt.Errorf("failed to create worktree: %w", err)
 	}
-
-	log.Debugf("🚀 Creating tmux session '%s'...\n", sessionName)
-	if err := tmuxMgr.CreateSession(sessionName, clonePath, claudeCmd); err != nil {
-		return fmt.Errorf("failed to create tmux session: %w", err)
-	}
+	log.Debugf("✓ Worktree created\n")
 
 	sess := &types.Session{
-		Name:      sessionName,
-		RepoURL:   selected.URL,
-		Title:     sessionName,
-		ClonePath: clonePath,
-		CreatedAt: time.Now(),
+		Name:         sessionName,
+		RepoURL:      selected.URL,
+		Title:        sessionName,
+		WorktreePath: worktreePath,
+		BaseRepoPath: baseRepoPath,
+		CreatedAt:    time.Now(),
 	}
-	if err := sessionMgr.Save(sess); err != nil {
-		log.Warnf("⚠️  Failed to save session metadata: %v\n", err)
-	}
-
-	// Set tmux session env var for status bar display
-	if err := tmuxMgr.SetSessionEnv(sessionName, "@claude-matrix-title", sessionName); err != nil {
-		log.Warnf("⚠️  Failed to set session title env: %v\n", err)
-	}
-
-	// User-facing success confirmation — always visible
-	fmt.Printf("✓ Session created: %s\n", sessionName)
-
-	if err := tmuxMgr.SwitchToSession(sessionName); err != nil {
-		log.Warnf("⚠️  Failed to switch to session: %v\n", err)
-		log.Warnf("You can attach manually with: tmux attach -t %s\n", sessionName)
-	}
-
-	return nil
+	return finalizeSession(cfg, sess, sessionMgr, tmuxMgr, log)
 }
 
 func createWorkspaceSession(cfg *types.Config, selected *types.Repository, sessionMgr *session.Manager, gitMgr *git.Manager, tmuxMgr *tmux.Manager, log *logging.Logger) error {
@@ -143,63 +122,68 @@ func createWorkspaceSession(cfg *types.Config, selected *types.Repository, sessi
 		return fmt.Errorf("failed to generate session name: %w", err)
 	}
 
-	workspacePath := filepath.Join(cfg.CloneDir, sessionName)
+	workspacePath := filepath.Join(cfg.WorktreeDir, sessionName)
 	if err := os.MkdirAll(workspacePath, 0755); err != nil {
 		return fmt.Errorf("failed to create workspace directory: %w", err)
 	}
 
-	log.Debugf("📦 Setting up workspace '%s' with %d repos...\n", selected.Name, len(selected.WorkspaceRepos))
+	log.Debugf("🌿 Setting up workspace '%s' with %d repos (using worktrees)...\n", selected.Name, len(selected.WorkspaceRepos))
 
 	for _, repoURL := range selected.WorkspaceRepos {
 		repoName := git.ExtractRepoName(repoURL)
-		// Replace slashes with dashes for directory name
 		dirName := strings.ReplaceAll(repoName, "/", "-")
-		clonePath := filepath.Join(workspacePath, dirName)
 
-		if _, err := os.Stat(clonePath); err == nil {
-			log.Debugf("  ✓ %s already exists\n", repoName)
-		} else {
-			log.Debugf("  📦 Cloning %s...\n", repoName)
-			if err := gitMgr.Clone(repoURL, clonePath); err != nil {
-				return fmt.Errorf("failed to clone %s: %w", repoURL, err)
-			}
-			log.Debugf("  ✓ %s cloned\n", repoName)
+		log.Debugf("  📦 Ensuring base repo for %s...\n", repoName)
+		baseRepoPath, err := gitMgr.EnsureBaseRepo(repoURL, cfg.BaseRepoDir)
+		if err != nil {
+			return fmt.Errorf("failed to ensure base repo for %s: %w", repoURL, err)
 		}
+
+		worktreePath := filepath.Join(workspacePath, dirName)
+		branchName := "worktree-" + sessionName + "-" + dirName
+		log.Debugf("  🌿 Creating worktree for %s...\n", repoName)
+		if err := gitMgr.AddWorktree(baseRepoPath, worktreePath, branchName); err != nil {
+			return fmt.Errorf("failed to create worktree for %s: %w", repoURL, err)
+		}
+		log.Debugf("  ✓ %s ready\n", repoName)
 	}
 
+	sess := &types.Session{
+		Name:         sessionName,
+		RepoURL:      "workspace:" + selected.Name,
+		Title:        sessionName,
+		RepoURLs:     selected.WorkspaceRepos,
+		WorktreePath: workspacePath,
+		CreatedAt:    time.Now(),
+	}
+	return finalizeSession(cfg, sess, sessionMgr, tmuxMgr, log)
+}
+
+// finalizeSession creates the tmux session, saves metadata, and switches to it.
+func finalizeSession(cfg *types.Config, sess *types.Session, sessionMgr *session.Manager, tmuxMgr *tmux.Manager, log *logging.Logger) error {
 	var claudeCmd string
 	if cfg.ClaudeBin != "" {
 		claudeCmd = cfg.ClaudeBin + " " + strings.Join(cfg.ClaudeArgs, " ")
 	}
 
-	log.Debugf("🚀 Creating tmux session '%s'...\n", sessionName)
-	if err := tmuxMgr.CreateSession(sessionName, workspacePath, claudeCmd); err != nil {
+	log.Debugf("🚀 Creating tmux session '%s'...\n", sess.Name)
+	if err := tmuxMgr.CreateSession(sess.Name, sess.WorktreePath, claudeCmd); err != nil {
 		return fmt.Errorf("failed to create tmux session: %w", err)
 	}
 
-	sess := &types.Session{
-		Name:      sessionName,
-		RepoURL:   "workspace:" + selected.Name,
-		Title:     sessionName,
-		RepoURLs:  selected.WorkspaceRepos,
-		ClonePath: workspacePath,
-		CreatedAt: time.Now(),
-	}
 	if err := sessionMgr.Save(sess); err != nil {
 		log.Warnf("⚠️  Failed to save session metadata: %v\n", err)
 	}
 
-	// Set tmux session env var for status bar display
-	if err := tmuxMgr.SetSessionEnv(sessionName, "@claude-matrix-title", sessionName); err != nil {
+	if err := tmuxMgr.SetSessionEnv(sess.Name, "@claude-matrix-title", sess.Name); err != nil {
 		log.Warnf("⚠️  Failed to set session title env: %v\n", err)
 	}
 
-	// User-facing success confirmation — always visible
-	fmt.Printf("✓ Workspace session created: %s\n", sessionName)
+	fmt.Printf("✓ Session created: %s\n", sess.Name)
 
-	if err := tmuxMgr.SwitchToSession(sessionName); err != nil {
+	if err := tmuxMgr.SwitchToSession(sess.Name); err != nil {
 		log.Warnf("⚠️  Failed to switch to session: %v\n", err)
-		log.Warnf("You can attach manually with: tmux attach -t %s\n", sessionName)
+		log.Warnf("You can attach manually with: tmux attach -t %s\n", sess.Name)
 	}
 
 	return nil
