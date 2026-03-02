@@ -73,7 +73,7 @@ jobs:
         run: ./bin/claude-matrix --help
 
       - name: Upload binary
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: claude-matrix-linux-amd64
           path: bin/claude-matrix
@@ -116,7 +116,7 @@ jobs:
         run: make cross-compile
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: claude-matrix-binaries
           path: bin/claude-matrix-*
