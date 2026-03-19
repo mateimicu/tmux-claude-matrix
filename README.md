@@ -1,136 +1,54 @@
 # Tmux Claude Matrix
 
-A tmux session manager with Claude AI integration.
+A Go CLI tool for managing tmux development sessions with Claude AI state tracking.
 
-## Installation
+## Quick Start
 
 ```bash
+# Install
 git clone https://github.com/mateimicu/tmux-claude-matrix.git
 cd tmux-claude-matrix
-./install.sh
+make build        # binary at ./bin/claude-matrix
+./install.sh      # or install as tmux plugin
 ```
 
-Or as a tmux plugin via TPM:
+Or via TPM: `set -g @plugin 'mateimicu/tmux-claude-matrix'`
 
-```tmux
-set -g @plugin 'mateimicu/tmux-claude-matrix'
-```
+## Commands
 
-## Usage
+| Command | Description |
+|---------|-------------|
+| `create` | Create a new session from a repo |
+| `list` | List and switch between sessions |
+| `rename` | Rename a session title |
+| `refresh` | Refresh repository cache |
+| `diagnose` | Check configuration |
+| `setup-hooks` | Enable Claude state tracking |
+| `remove-hooks` | Disable Claude state tracking |
 
-```bash
-# Create a session
-claude-matrix create
+## Key Features
 
-# List sessions
-claude-matrix list
-
-# Rename a session
-claude-matrix rename [title]
-
-# Refresh repository cache
-claude-matrix refresh
-
-# Check configuration
-claude-matrix diagnose
-```
-
-## Features
-
-<details>
-<summary>Session Management</summary>
-
-Create, list, and rename tmux sessions tied to repository clones. Sessions track metadata (repo URL, clone path, timestamps) and auto-generate unique names. Switch between sessions directly from the FZF list view.
-
-</details>
-
-<details>
-<summary>Repository Discovery</summary>
-
-Three repository sources:
-- **Local file** (`repos.txt`) — list repos with optional descriptions
-- **GitHub** — auto-discover repos from authenticated GitHub accounts, filterable by org
-- **Workspaces** (`workspaces.yaml`) — group multiple repos into named workspaces
-
-Results are cached with a 30-minute TTL. Supports HTTPS and SSH URL formats.
-
-</details>
-
-<details>
-<summary>Claude AI Integration</summary>
-
-Auto-detect and launch Claude in sessions. A hook system listens to Claude Code events (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`, `Notification`, `SessionEnd`) and tracks state in real time.
-
-Six states with visual indicators in tmux windows and the session list:
-- Running, Waiting for Input, Idle, Stopped, Error, Unknown
-
-Setup with `claude-matrix setup-hooks`, remove with `claude-matrix remove-hooks`.
-
-</details>
-
-<details>
-<summary>FZF Interactive UI</summary>
-
-Interactive selection for both repository browsing and session management:
-- Aligned table view with columns: index, tmux status, source, repository, Claude state, session name
-- `Enter` to switch, `Ctrl+D` to delete
-- Emoji legend in the header
-
-</details>
-
-<details>
-<summary>Git Mirror Cache</summary>
-
-Clones use a local mirror cache (`~/.tmux-claude-matrix/.cache/mirrors/`) so subsequent clones of the same repo are fast local operations instead of full network fetches.
-
-</details>
-
-<details>
-<summary>Status Bar Integration</summary>
-
-Sessions have auto-generated titles (`org/repo #N`) shown in the tmux status bar via the `@claude-matrix-title` environment variable. Use `claude-matrix rename` to customize titles.
-
-```tmux
-set -g status-right "#{@claude-matrix-title} | %H:%M"
-```
-
-</details>
-
-<details>
-<summary>Tmux Keybindings</summary>
-
-When installed as a tmux plugin:
-- `prefix + a` — create session
-- `prefix + A` — list sessions
-
-</details>
+- **Session management** — tmux sessions tied to repo clones with metadata tracking
+- **Repo discovery** — GitHub API, local file (`repos.txt`), or YAML workspaces
+- **Claude integration** — hooks track Claude Code state (running, idle, waiting, stopped, error) in real time
+- **FZF UI** — interactive selection with `Enter` to switch, `Ctrl+D` to delete
+- **Mirror cache** — fast re-clones via local git mirrors
 
 ## Configuration
 
-Create `~/.config/tmux-claude-matrix/config` (or `~/.tmux-claude-matrix/config`):
+Config file at `~/.config/tmux-claude-matrix/config` or `~/.tmux-claude-matrix/config`. All options also available as `TMUX_CLAUDE_MATRIX_`-prefixed env vars.
+
+Key settings: `GITHUB_ENABLED`, `CLONE_DIR`, `CLAUDE_BIN`, `CLAUDE_ARGS`, `GITHUB_ORGS`.
+
+See `claude-matrix diagnose` for current config status.
+
+## Development
 
 ```bash
-# Repository sources
-GITHUB_ENABLED=1
-LOCAL_CONFIG_ENABLED=1
-LOCAL_REPOS_FILE=~/.tmux-claude-matrix/repos.txt
-WORKSPACES_ENABLED=1
-WORKSPACES_FILE=~/.tmux-claude-matrix/workspaces.yaml
-
-# Directories
-CLONE_DIR=~/.tmux-claude-matrix/repos
-SESSIONS_DIR=~/.tmux-claude-matrix/sessions
-CACHE_DIR=~/.tmux-claude-matrix/.cache
-
-# Claude integration
-CLAUDE_BIN=/usr/local/bin/claude
-CLAUDE_ARGS="--dangerously-skip-permissions"
-
-# GitHub filtering
-GITHUB_ORGS=org1,org2
+make test    # tests with race detector
+make lint    # golangci-lint
+make ci      # full CI: fmt + lint + test + build
 ```
-
-All options can also be set via environment variables prefixed with `TMUX_CLAUDE_MATRIX_` (e.g. `TMUX_CLAUDE_MATRIX_CLONE_DIR`).
 
 ## License
 
